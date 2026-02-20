@@ -1,0 +1,59 @@
+<!doctype html>
+<html lang="en">
+
+<meta charset="utf-8" />
+<title>Grindland</title>
+<meta name="viewport" content="width=device-width,initial-scale=1,user-scalable=no" />
+<!-- Vite handles module resolution automatically -->
+  <script type="module" crossorigin src="/assets/index-CutGSaKa.js"></script>
+  <link rel="stylesheet" crossorigin href="/assets/index-CyzxT0hC.css">
+</head>
+
+<body>
+    <div id="mainMenu">
+        <h1 style="color: white; font-size: 64px; margin: 0 0 30px 0; text-shadow: 4px 4px 0 rgba(0,0,0,0.5);">Grindland
+        </h1>
+        <div class="btn" id="playBtn">Play</div>
+        <div style="margin-top: 20px; display: flex; flex-direction: column; align-items: center; gap: 10px;">
+            <div
+                style="color: white; font-family: sans-serif; font-size: 18px; text-shadow: 2px 2px 0 rgba(0,0,0,0.5);">
+                Room Code: <span id="roomCodeDisplay"
+                    style="font-weight: bold; background: rgba(0,0,0,0.5); padding: 4px 8px; border-radius: 4px; user-select: text;">...</span>
+            </div>
+            <div style="display: flex; gap: 10px; align-items: center;">
+                <input type="text" id="joinCodeInput" placeholder="Friend's Code"
+                    style="padding: 10px; border: none; border-radius: 4px; outline: none; font-size: 16px; font-family: sans-serif; width: 140px;">
+                <div class="btn" id="joinBtn" style="font-size: 16px; padding: 10px 20px;">Join Room</div>
+            </div>
+        </div>
+    </div>
+    <div id="pauseMenu" style="display: none;">
+        <div style="display: flex; align-items: center; gap: 40px;">
+            <div style="display: flex; flex-direction: column; gap: 20px;">
+                <div class="btn" id="resumeBtn">Resume Game</div>
+                <div class="btn" id="toMenuBtn">Main Menu</div>
+            </div>
+
+            <div class="settings-container" style="margin: 0;">
+                <div class="setting-row">
+                    <div class="setting-label">Sensitivity <input type="number" id="sensInput" value="25" min="1"
+                            max="100"></div>
+                    <input type="range" id="sensSlider" min="1" max="100" value="25">
+                </div>
+                <div class="setting-row">
+                    <div class="setting-label">Field of View <input type="number" id="fovInput" value="70" min="30"
+                            max="110"></div>
+                    <input type="range" id="fovSlider" min="30" max="110" value="70">
+                </div>
+            </div>
+        </div>
+    </div>
+    <div id="hud" aria-hidden="true">
+        <div id="panel">FPS: <span id="fps">—</span> | <span id="gameTime">6:00</span></div>
+    </div>
+    <div id="hotbar" aria-hidden="true"></div>
+    <div id="cross" aria-hidden="true"></div>
+
+</body>
+
+</html>
