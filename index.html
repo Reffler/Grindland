@@ -1,0 +1,62 @@
+<!doctype html>
+<html lang="en">
+
+<meta charset="utf-8" />
+<title>Grindland</title>
+<meta name="viewport" content="width=device-width,initial-scale=1,user-scalable=no" />
+<!-- Vite handles module resolution automatically -->
+  <script type="module" crossorigin src="/assets/index-Da5t1rad.js"></script>
+  <link rel="stylesheet" crossorigin href="/assets/index-bcUz91GC.css">
+</head>
+
+<body>
+    <div id="mainMenu">
+        <h1 style="color: white; font-size: 64px; margin: 0 0 30px 0; text-shadow: 4px 4px 0 rgba(0,0,0,0.5);">Grindland
+        </h1>
+        <div class="btn" id="playBtn">Play</div>
+        <div class="btn menu-gap" id="optionsBtn">Options</div>
+    </div>
+    <div id="mainOptions" style="display: none;">
+        <h2>Options</h2>
+        <div class="settings-container">
+            <div class="setting-row">
+                <div class="setting-label">Sensitivity <input type="number" id="mainSensInput" value="25" min="1" max="100"></div>
+                <input type="range" id="mainSensSlider" min="1" max="100" value="25">
+            </div>
+            <div class="setting-row">
+                <div class="setting-label">Field of View <input type="number" id="mainFovInput" value="70" min="30" max="110"></div>
+                <input type="range" id="mainFovSlider" min="30" max="110" value="70">
+            </div>
+        </div>
+        <div class="btn" id="optionsBackBtn">Back</div>
+    </div>
+    <div id="pauseMenu" style="display: none;">
+        <div style="display: flex; align-items: center; gap: 40px;">
+            <div style="display: flex; flex-direction: column; gap: 20px;">
+                <div class="btn" id="resumeBtn">Resume Game</div>
+                <div class="btn" id="toMenuBtn">Main Menu</div>
+            </div>
+
+            <div class="settings-container" style="margin: 0;">
+                <div class="setting-row">
+                    <div class="setting-label">Sensitivity <input type="number" id="sensInput" value="25" min="1"
+                            max="100"></div>
+                    <input type="range" id="sensSlider" min="1" max="100" value="25">
+                </div>
+                <div class="setting-row">
+                    <div class="setting-label">Field of View <input type="number" id="fovInput" value="70" min="30"
+                            max="110"></div>
+                    <input type="range" id="fovSlider" min="30" max="110" value="70">
+                </div>
+            </div>
+        </div>
+    </div>
+    <div id="hud" aria-hidden="true">
+        <div id="panel">FPS: <span id="fps">—</span></div>
+    </div>
+    <div id="hotbar" aria-hidden="true"></div>
+    <div id="cross" aria-hidden="true"></div>
+
+</body>
+
+</html>
