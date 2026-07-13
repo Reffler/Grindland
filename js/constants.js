@@ -50,6 +50,8 @@ export const STRING = 104;
 export const STONE_PEBBLE = 105;
 export const CHARCOAL = 106;
 export const TORCH = 107;
+export const SHOP = 108;
+export const SHOPPER = 109;
 
 // Log axis orientations (like Minecraft)
 export const AXIS_Y = 0; // Vertical (default)

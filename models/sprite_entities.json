@@ -1,0 +1,20 @@
+{
+  "version": 1,
+  "baseSize": 2.2,
+  "entities": {
+    "shop": {
+      "front": "./models/shop.png",
+      "back": "./models/shop.png",
+      "scale": 1,
+      "voxels": 1,
+      "anchor": { "x": 0.5, "y": 0, "z": 0.5 }
+    },
+    "shopper": {
+      "front": "./models/shopper_front.png",
+      "back": "./models/shopper_back.png",
+      "scale": 0.5,
+      "voxels": 8,
+      "anchor": { "x": 0.5, "y": 0, "z": 1 }
+    }
+  }
+}

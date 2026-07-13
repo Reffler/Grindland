@@ -1,7 +1,7 @@
 import {
     AIR, GRASS, DIRT, STONE, LOG, LEAVES, SAPLING, COBBLESTONE,
     INFECTED_LEAVES, CRAFTING_TABLE, FURNACE, CHEST, PLANKS, STICK,
-    CROOK, SILKWORM, STRING, STONE_PEBBLE, CHARCOAL, TORCH,
+    CROOK, SILKWORM, STRING, STONE_PEBBLE, CHARCOAL, TORCH, SHOP, SHOPPER,
 } from "./constants.js";
 
 const block = (id, name, material, options = {}) => ({
@@ -61,6 +61,8 @@ export const ITEMS = {
     [STONE_PEBBLE]: item(STONE_PEBBLE, "Stone Pebble", "./textures/pebble.png"),
     [CHARCOAL]: item(CHARCOAL, "Charcoal", "./textures/coal.png", { fuel: true, color: 0x333333 }),
     [TORCH]: item(TORCH, "Torch", "./textures/torch.png", { color: 0xffcc55 }),
+    [SHOP]: item(SHOP, "Shop", "./models/shop.png", { maxStack: 1, spriteEntity: "shop", color: 0xffffff }),
+    [SHOPPER]: item(SHOPPER, "Shopper", "./models/shopper_front.png", { maxStack: 1, spriteEntity: "shopper", color: 0xffffff }),
 };
 
 export const RECIPES = [

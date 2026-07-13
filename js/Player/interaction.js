@@ -14,6 +14,7 @@ import { camera, excludeCutoutFromNormalPass, scene } from "../Graphics/setup.js
 import { playPlaceAnimation, playPunchAnimation } from "../Graphics/heldItem.js";
 import { BLOCKS, ITEMS } from "../registries.js";
 import { spawnItem } from "../Mechanics/itemDrops.js";
+import { spawnSpriteEntity } from "../Entities/spriteEntity.js";
 import { spawnBlockParticles } from "../Graphics/blockParticles.js";
 import { positionKey, removeStation } from "../Mechanics/stations.js";
 import { openStation, showToast, updateJadeTarget, isGameplayUIOpen } from "../Hud/ui.js";
@@ -299,6 +300,15 @@ function tryPlace(hit) {
         pz < player.pos.z + RAD;
     if (inside) return;
     const selected = getSelected();
+    const spriteEntity = ITEMS[selected.id]?.spriteEntity;
+    if (spriteEntity) {
+        if (hit.face[1] !== 1) return;
+        const rotation = Math.round(player.yaw / (Math.PI / 2)) * (Math.PI / 2);
+        spawnSpriteEntity(spriteEntity, { x: px, y: py, z: pz }, rotation).catch(console.error);
+        consumeSelected(selected.id);
+        playPlaceAnimation();
+        return;
+    }
     const id = ITEMS[selected.id]?.placeBlock;
     if (!id || !BLOCKS[id]?.placeable) return;
     const ground = world.get(px, py - 1, pz);

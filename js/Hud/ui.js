@@ -2,7 +2,7 @@ import { BLOCK_ICON, ICON } from "../Graphics/materials.js";
 import {
     AIR, DIRT, GRASS, STONE, LOG, LEAVES, INFECTED_LEAVES,
     COBBLESTONE, CRAFTING_TABLE, FURNACE, CHEST, PLANKS, CROOK, STRING,
-    HARD, HOTBAR_SIZE, INV_SIZE,
+    HARD, HOTBAR_SIZE, INV_SIZE, SHOP, SHOPPER,
     STATE_MAIN, STATE_PLAY,
 } from "../constants.js";
 import {
@@ -190,15 +190,20 @@ function runChatCommand(raw) {
         addChatMessage(`Set time to ${parts[2]}`);
         return;
     }
-    if (parts[0] === "/spawn" && parts[1] === "goblin" && parts.length === 2) {
+    const giveId = { shop: SHOP, shopper: SHOPPER }[parts[1]];
+    if (parts[0] === "/give" && giveId && (parts.length === 2 || parts.length === 3)) {
         if (!cheatsEnabled) {
             addChatMessage("Cheats are disabled", true);
             return;
         }
-        window.dispatchEvent(new CustomEvent("game-command", {
-            detail: { type: "spawn", value: "goblin" },
-        }));
-        addChatMessage("Spawned goblin");
+        const amount = parts.length === 3 ? Number(parts[2]) : 1;
+        if (!Number.isInteger(amount) || amount < 1) {
+            addChatMessage("Invalid amount", true);
+            return;
+        }
+        const left = addToSlots(inv, giveId, amount);
+        inventoryChanged();
+        addChatMessage(left ? `Inventory full (${left} not given)` : `Given ${parts[1]} ×${amount}`);
         return;
     }
     addChatMessage("Unknown command", true);

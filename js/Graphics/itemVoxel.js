@@ -4,17 +4,22 @@ import { ITEMS } from "../registries.js";
 const assets = new Map();
 const pending = new Map();
 
-function buildAsset(image) {
+export function buildVoxelAsset(image, size = 0.34, halfDepth = 0.016, backImage = image) {
     const canvas = document.createElement("canvas");
     canvas.width = image.naturalWidth || image.width;
     canvas.height = image.naturalHeight || image.height;
     const context = canvas.getContext("2d", { willReadFrequently: true });
     context.drawImage(image, 0, 0);
     const pixels = context.getImageData(0, 0, canvas.width, canvas.height).data;
+    const backCanvas = document.createElement("canvas");
+    backCanvas.width = canvas.width;
+    backCanvas.height = canvas.height;
+    const backContext = backCanvas.getContext("2d", { willReadFrequently: true });
+    backContext.drawImage(backImage, 0, 0, backCanvas.width, backCanvas.height);
+    const backPixels = backContext.getImageData(0, 0, backCanvas.width, backCanvas.height).data;
     const width = canvas.width;
     const height = canvas.height;
-    const unit = 0.34 / Math.max(width, height);
-    const halfDepth = 0.016;
+    const unit = size / Math.max(width, height);
     const positions = [];
     const normals = [];
     const colors = [];
@@ -39,13 +44,15 @@ function buildAsset(image) {
         const x1 = x0 + unit;
         const y1 = (height * 0.5 - py) * unit;
         const y0 = y1 - unit;
-        const rgb = [color.r, color.g, color.b];
-        addQuad([[x0, y0, halfDepth], [x1, y0, halfDepth], [x1, y1, halfDepth], [x0, y1, halfDepth]], [0, 0, 1], ...rgb);
-        addQuad([[x1, y0, -halfDepth], [x0, y0, -halfDepth], [x0, y1, -halfDepth], [x1, y1, -halfDepth]], [0, 0, -1], ...rgb);
-        if (!opaque(px - 1, py)) addQuad([[x0, y0, -halfDepth], [x0, y0, halfDepth], [x0, y1, halfDepth], [x0, y1, -halfDepth]], [-1, 0, 0], ...rgb);
-        if (!opaque(px + 1, py)) addQuad([[x1, y0, halfDepth], [x1, y0, -halfDepth], [x1, y1, -halfDepth], [x1, y1, halfDepth]], [1, 0, 0], ...rgb);
-        if (!opaque(px, py + 1)) addQuad([[x0, y0, -halfDepth], [x1, y0, -halfDepth], [x1, y0, halfDepth], [x0, y0, halfDepth]], [0, -1, 0], ...rgb);
-        if (!opaque(px, py - 1)) addQuad([[x0, y1, halfDepth], [x1, y1, halfDepth], [x1, y1, -halfDepth], [x0, y1, -halfDepth]], [0, 1, 0], ...rgb);
+        const frontRgb = [color.r, color.g, color.b];
+        color.setRGB(backPixels[offset] / 255, backPixels[offset + 1] / 255, backPixels[offset + 2] / 255, THREE.SRGBColorSpace);
+        const backRgb = [color.r, color.g, color.b];
+        addQuad([[x0, y0, halfDepth], [x1, y0, halfDepth], [x1, y1, halfDepth], [x0, y1, halfDepth]], [0, 0, 1], ...frontRgb);
+        addQuad([[x1, y0, -halfDepth], [x0, y0, -halfDepth], [x0, y1, -halfDepth], [x1, y1, -halfDepth]], [0, 0, -1], ...backRgb);
+        if (!opaque(px - 1, py)) addQuad([[x0, y0, -halfDepth], [x0, y0, halfDepth], [x0, y1, halfDepth], [x0, y1, -halfDepth]], [-1, 0, 0], ...frontRgb);
+        if (!opaque(px + 1, py)) addQuad([[x1, y0, halfDepth], [x1, y0, -halfDepth], [x1, y1, -halfDepth], [x1, y1, halfDepth]], [1, 0, 0], ...frontRgb);
+        if (!opaque(px, py + 1)) addQuad([[x0, y0, -halfDepth], [x1, y0, -halfDepth], [x1, y0, halfDepth], [x0, y0, halfDepth]], [0, -1, 0], ...frontRgb);
+        if (!opaque(px, py - 1)) addQuad([[x0, y1, halfDepth], [x1, y1, halfDepth], [x1, y1, -halfDepth], [x0, y1, -halfDepth]], [0, 1, 0], ...frontRgb);
     }
 
     const geometry = new THREE.BufferGeometry();
@@ -60,6 +67,10 @@ function buildAsset(image) {
         metalness: 0,
     });
     return { geometry, material };
+}
+
+function buildAsset(image) {
+    return buildVoxelAsset(image);
 }
 
 export function getItemVoxelAsset(id, onReady = null) {

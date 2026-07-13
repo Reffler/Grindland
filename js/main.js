@@ -11,7 +11,6 @@ import { updateEnvironment } from "./Mechanics/environment.js";
 import { disposeItemDrops, updateItemDrops } from "./Mechanics/itemDrops.js";
 import { updateFurnaces } from "./Mechanics/stations.js";
 import { updateBlockParticles } from "./Graphics/blockParticles.js";
-import { spawnGoblin } from "./Entities/goblin.js";
 import { initUI, gameState, updateFPS, setPlayerAndSpawn, isGameplayUIOpen } from "./Hud/ui.js";
 import { STATE_MAIN, STATE_PLAY, STATE_PAUSE, DAY_DURATION, CELESTIAL_RADIUS } from "./constants.js";
 import * as THREE from "three";
@@ -43,11 +42,6 @@ let dayTime = DAY_DURATION * 0.25; // Start at sunrise (0.25 of cycle)
 window.addEventListener("game-command", (event) => {
     if (event.detail?.type === "time") {
         dayTime = DAY_DURATION * (event.detail.value === "night" ? 0.75 : 0.25);
-    } else if (event.detail?.type === "spawn" && event.detail.value === "goblin") {
-        const position = player.pos.clone();
-        position.x -= Math.sin(player.yaw) * 2;
-        position.z -= Math.cos(player.yaw) * 2;
-        spawnGoblin(position, player.yaw + Math.PI).catch(console.error);
     }
 });
 
