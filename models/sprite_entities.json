@@ -1,20 +1,146 @@
 {
   "version": 1,
-  "baseSize": 2.2,
   "entities": {
     "shop": {
-      "front": "./models/shop.png",
-      "back": "./models/shop.png",
-      "scale": 1,
-      "voxels": 1,
-      "anchor": { "x": 0.5, "y": 0, "z": 0.5 }
+      "anchor": { "x": 0.5, "y": 0, "z": 0.5 },
+      "parts": [
+        {
+          "front": "./models/shop_front.png",
+          "back": "./models/shop_front.png",
+          "width": 3,
+          "height": 2,
+          "voxels": 1,
+          "offset": { "x": 0, "y": 0, "z": 0 },
+          "rotation": 0
+        },
+        {
+          "front": "./models/shop_front.png",
+          "back": "./models/shop_front.png",
+          "width": 3,
+          "height": 2,
+          "voxels": 1,
+          "offset": { "x": 0, "y": 0, "z": -1 },
+          "rotation": 0
+        },
+        {
+          "front": "./models/shop_side.png",
+          "back": "./models/shop_side.png",
+          "width": 1.45,
+          "height": 2,
+          "voxels": 1,
+          "offset": { "x": -0.8, "y": 0, "z": -0.5 },
+          "rotation": 90
+        },
+        {
+          "front": "./models/shop_side.png",
+          "back": "./models/shop_side.png",
+          "width": 1.45,
+          "height": 2,
+          "voxels": 1,
+          "offset": { "x": 0.8, "y": 0, "z": -0.5 },
+          "rotation": 90
+        }
+      ]
     },
     "shopper": {
-      "front": "./models/shopper_front.png",
-      "back": "./models/shopper_back.png",
-      "scale": 0.5,
-      "voxels": 8,
-      "anchor": { "x": 0.5, "y": 0, "z": 1 }
+      "anchor": { "x": 0.5, "y": 0, "z": 1 },
+      "canvasAligned": true,
+      "idleAnimation": {
+        "period": 3.6,
+        "headBob": 0.025,
+        "bodyBob": 0.012,
+        "chestScale": 0.018,
+        "armAngle": 0.035,
+        "earAngle": 0.025
+      },
+      "parts": [
+        {
+          "front": "./models/shopper_torso_front.png",
+          "back": "./models/shopper_torso_back.png",
+          "width": 1,
+          "height": 1.25,
+          "voxels": 10,
+          "idlePart": "chest"
+        },
+        {
+          "front": "./models/shopper_belly_front.png",
+          "frontOnly": true,
+          "width": 1,
+          "height": 1.25,
+          "voxels": 8,
+          "depthExtension": "front",
+          "idlePart": "belly"
+        },
+        {
+          "front": "./models/shopper_l_arm_front.png",
+          "back": "./models/shopper_l_arm_back.png",
+          "width": 1,
+          "height": 1.25,
+          "voxels": 4,
+          "idlePart": "leftArm",
+          "pivot": "topRight"
+        },
+        {
+          "front": "./models/shopper_r_arm_front.png",
+          "back": "./models/shopper_r_arm_back.png",
+          "width": 1,
+          "height": 1.25,
+          "voxels": 4,
+          "idlePart": "rightArm",
+          "pivot": "topLeft"
+        },
+        {
+          "front": "./models/shopper_l_leg_front.png",
+          "back": "./models/shopper_l_leg_back.png",
+          "width": 1,
+          "height": 1.25,
+          "voxels": 4
+        },
+        {
+          "front": "./models/shopper_r_leg_right.png",
+          "back": "./models/shopper_r_leg_back.png",
+          "width": 1,
+          "height": 1.25,
+          "voxels": 4
+        },
+        {
+          "front": "./models/shopper_head_front.png",
+          "back": "./models/shopper_head_back.png",
+          "width": 1,
+          "height": 1.25,
+          "voxels": 24,
+          "idlePart": "head",
+          "offset": { "x": 0, "y": -0.05, "z": 0 }
+        },
+        {
+          "front": "./models/shopper_nose_front.png",
+          "frontOnly": true,
+          "width": 1,
+          "height": 1.25,
+          "voxels": 13,
+          "depthExtension": "front",
+          "idlePart": "head",
+          "offset": { "x": 0, "y": -0.05, "z": 0 }
+        },
+        {
+          "front": "./models/shopper_l_ear_front.png",
+          "back": "./models/shopper_l_ear_back.png",
+          "width": 1,
+          "height": 1.25,
+          "voxels": 2,
+          "idlePart": "leftEar",
+          "pivot": "bottomLeft"
+        },
+        {
+          "front": "./models/shopper_r_ear_front.png",
+          "back": "./models/shopper_r_ear_back.png",
+          "width": 1,
+          "height": 1.25,
+          "voxels": 2,
+          "idlePart": "rightEar",
+          "pivot": "bottomRight"
+        }
+      ]
     }
   }
 }

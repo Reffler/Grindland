@@ -11,6 +11,7 @@ import { updateEnvironment } from "./Mechanics/environment.js";
 import { disposeItemDrops, updateItemDrops } from "./Mechanics/itemDrops.js";
 import { updateFurnaces } from "./Mechanics/stations.js";
 import { updateBlockParticles } from "./Graphics/blockParticles.js";
+import { spawnSpriteEntity, updateSpriteEntities } from "./Entities/spriteEntity.js";
 import { initUI, gameState, updateFPS, setPlayerAndSpawn, isGameplayUIOpen } from "./Hud/ui.js";
 import { STATE_MAIN, STATE_PLAY, STATE_PAUSE, DAY_DURATION, CELESTIAL_RADIUS } from "./constants.js";
 import * as THREE from "three";
@@ -19,6 +20,10 @@ import * as THREE from "three";
 export const SPAWN = buildSkyblockWithTree(world);
 player.pos.set(SPAWN.x, SPAWN.y, SPAWN.z);
 setSpawnPoint(SPAWN); // Set spawn point for void fall respawn
+Promise.all([
+    spawnSpriteEntity("shop", SPAWN.oakCenter, Math.PI),
+    spawnSpriteEntity("shopper", SPAWN.oakCenter, Math.PI),
+]).catch(console.error);
 
 // Sun/Moon targets for shadow direction
 const sunTarget = new THREE.Object3D();
@@ -113,6 +118,7 @@ function tick(now) {
     if (dt > 0.05) dt = 0.05;
     updateZoom(dt, gameState === STATE_PLAY && keys.KeyC && !isGameplayUIOpen());
     updateHeldItem(dt, gameState === STATE_PLAY && !isGameplayUIOpen());
+    updateSpriteEntities(now * 0.001);
 
     const gameplayUIOpen = isGameplayUIOpen();
     if (gameState !== STATE_PLAY || !gameplayUIOpen) dayTime += dt;
