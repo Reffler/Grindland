@@ -72,9 +72,9 @@ body {
     position: relative;
     width: 44px;
     height: 44px;
-    border-radius: 10px;
+    border-radius: 0;
     background: rgba(0, 0, 0, 0.35);
-    border: 2px solid rgba(255, 255, 255, 0.35);
+    border: 2px solid #050505;
     display: grid;
     place-items: center;
     min-width: 44px;
@@ -82,6 +82,7 @@ body {
     padding: 0;
     color: #fff;
     cursor: pointer;
+    box-shadow: inset 1px 1px #666, inset -1px -1px #222;
 }
 
 .sel {
@@ -92,8 +93,8 @@ body {
 .sw {
     width: 38px;
     height: 38px;
-    border-radius: 6px;
-    border: 1px solid rgba(255, 255, 255, 0.6);
+    border-radius: 0;
+    border: 0;
     background-size: cover;
     background-position: center center;
 }
@@ -312,6 +313,7 @@ input[type=range]::-webkit-slider-runnable-track {
 }
 
 #gameOverlay {
+    --ui-accent: #72c6d4;
     position: fixed;
     inset: 0;
     z-index: 120;
@@ -325,59 +327,202 @@ input[type=range]::-webkit-slider-runnable-track {
 .game-overlay-shell {
     display: flex;
     align-items: stretch;
-    gap: 18px;
-    width: min(920px, calc(100vw - 32px));
+    gap: 14px;
+    width: min(900px, calc(100vw - 32px));
     max-height: calc(100vh - 32px);
 }
 
 #gameOverlay.inventory-menu .game-overlay-shell {
-    width: min(1168px, calc(100vw - 32px));
+    width: min(940px, calc(100vw - 32px));
 }
 
-.inventory-controls {
+#gameOverlay.crafting-menu .game-overlay-shell {
+    width: min(672px, calc(100vw - 32px));
+}
+
+#gameOverlay.storage-menu .game-overlay-shell {
+    width: min(672px, calc(100vw - 32px));
+}
+
+#gameOverlay.storage-menu #gameplayWindow {
+    padding: 0;
+    border: 0;
+    background: none;
+    box-shadow: none;
+}
+
+#gameOverlay.furnace-menu .game-overlay-shell {
+    width: min(672px, calc(100vw - 32px));
+}
+
+#gameOverlay.settings-menu .game-overlay-shell {
+    width: min(480px, calc(100vw - 32px));
+}
+
+#gameOverlay.settings-menu .inventory-actions {
     display: none;
-    flex: 0 0 230px;
-    flex-direction: column;
-    gap: 14px;
-    box-sizing: border-box;
-    padding: 18px;
-    background: #3d3d3d;
-    border: 3px solid #111;
-    box-shadow: inset 2px 2px #777, inset -2px -2px #222, 8px 8px 0 rgba(0, 0, 0, .45);
-}
-
-.inventory-controls .btn {
-    width: 100%;
-    padding: 9px 10px;
-    font-size: 17px;
-}
-
-.inventory-controls .settings-container {
-    width: 100%;
-    margin: 6px 0 0;
 }
 
 .game-window {
-    flex: 1 1 920px;
+    flex: 1 1 900px;
     min-width: 0;
     max-height: calc(100vh - 32px);
     overflow: auto;
     box-sizing: border-box;
-    padding: 20px;
-    background: #3d3d3d;
+    padding: 14px;
+    background-color: #343638;
+    background-image: linear-gradient(rgba(35, 37, 39, .9), rgba(35, 37, 39, .9)), url("../textures/stone.png");
+    background-size: auto, 64px 64px;
     border: 3px solid #111;
-    box-shadow: inset 2px 2px #777, inset -2px -2px #222, 8px 8px 0 rgba(0, 0, 0, .45);
+    box-shadow: inset 2px 2px #686b6d, inset -2px -2px #1c1d1e;
+}
+
+.game-window[hidden] {
+    display: none;
+}
+
+.settings-window {
+    flex-basis: 420px;
+}
+
+.settings-window .settings-container {
+    width: 100%;
+}
+
+.settings-window .btn {
+    width: 100%;
+    padding: 9px 10px;
+    font-size: 17px;
 }
 
 .game-window h3 {
     margin: 0 0 12px;
 }
 
+.inventory-workspace {
+    display: flex;
+    gap: 8px;
+    min-width: 0;
+}
+
+.inventory-tabs {
+    display: flex;
+    flex: 0 0 auto;
+    flex-direction: column;
+    gap: 6px;
+    box-sizing: border-box;
+    padding: 7px 5px;
+    background-color: #30271f;
+    background-image: linear-gradient(rgba(28, 23, 19, .78), rgba(28, 23, 19, .78)), url("../textures/oak_planks.png");
+    background-size: auto, 48px 48px;
+    border: 2px solid #555b5d;
+}
+
+.inventory-tabs[hidden] {
+    display: none;
+}
+
+.inventory-tab,
+.inventory-action {
+    position: relative;
+    width: 38px;
+    height: 38px;
+    flex: 0 0 38px;
+    padding: 4px;
+    border: 2px solid #171717;
+    border-radius: 2px;
+    background: #292a2b;
+    color: #e9edef;
+    font: 22px/1 monospace;
+    cursor: pointer;
+}
+
+.inventory-tab:hover,
+.inventory-action:hover,
+.inventory-tab:focus-visible,
+.inventory-action:focus-visible,
+.inventory-tab.active {
+    border-color: var(--ui-accent);
+    outline: none;
+    background: #3b4244;
+    box-shadow: inset 0 0 0 1px var(--ui-accent);
+}
+
+.inventory-tab-icon {
+    width: 26px;
+    height: 26px;
+    background-size: cover;
+    image-rendering: pixelated;
+}
+
+.inventory-tab-icon.cube-item-icon {
+    --cube-size: 18px;
+    --cube-depth: 9px;
+    perspective: 70px;
+}
+
+.inventory-tab[hidden] {
+    display: none;
+}
+
+.inventory-actions {
+    align-self: flex-end;
+    flex: 0 0 auto;
+    padding: 14px;
+    border: 3px solid #111;
+    background-color: #343638;
+    background-image: linear-gradient(rgba(35, 37, 39, .9), rgba(35, 37, 39, .9)), url("../textures/stone.png");
+    background-size: auto, 64px 64px;
+    box-shadow: inset 2px 2px #686b6d, inset -2px -2px #1c1d1e;
+}
+
+.inventory-actions-wood {
+    display: flex;
+    align-items: center;
+    flex-direction: column;
+    gap: 6px;
+    padding: 9px 7px;
+    border: 2px solid #111;
+    background-color: #30271f;
+    background-image: linear-gradient(rgba(28, 23, 19, .7), rgba(28, 23, 19, .7)), url("../textures/oak_planks.png");
+    background-size: auto, 48px 48px;
+}
+
+.inventory-action {
+    width: 44px;
+    height: 44px;
+    flex-basis: 44px;
+    padding: 4px;
+    border: 3px solid #111;
+    background: #4a4c4d;
+    box-shadow: inset 2px 2px #8a8d8f, inset -2px -2px #222;
+}
+
+.inventory-action:hover,
+.inventory-action:focus-visible {
+    border-color: #111;
+    outline: 1px solid var(--ui-accent);
+    background: #55595b;
+    box-shadow: inset 2px 2px #9a9d9f, inset -2px -2px #222;
+}
+
+.inventory-content {
+    min-width: 0;
+    flex: 1 1 auto;
+    padding: 10px;
+    border: 2px solid #151515;
+    background: rgba(20, 21, 22, .72);
+}
+
 .ui-columns {
     display: grid;
-    grid-template-columns: minmax(520px, 1fr) 280px;
-    gap: 24px;
-    margin-top: 18px;
+    grid-template-columns: 503px minmax(260px, 1fr);
+    gap: 14px;
+    margin-top: 10px;
+}
+
+.inventory-center {
+    min-width: 0;
 }
 
 .slot-grid {
@@ -389,23 +534,91 @@ input[type=range]::-webkit-slider-runnable-track {
     grid-template-columns: repeat(10, 44px);
 }
 
-.inventory-grid .slot:nth-child(-n+10) {
-    background: rgba(85, 110, 65, .7);
+.inventory-stack {
+    width: 503px;
+}
+
+.inventory-hotbar {
+    margin-top: 14px;
+    padding-top: 12px;
+    border-top: 2px solid #555b5d;
+}
+
+.inventory-hotbar .slot {
+    background: rgba(63, 69, 71, .82);
 }
 
 .chest-grid {
-    grid-template-columns: repeat(9, 44px);
-    margin-bottom: 18px;
+    grid-template-columns: repeat(10, 44px);
+    width: fit-content;
 }
 
 .slot.moving {
-    border-color: #ffd65a;
-    box-shadow: 0 0 8px #ffd65a;
+    border-color: var(--ui-accent);
+    box-shadow: 0 0 8px var(--ui-accent);
 }
 
-.slot:hover {
-    border-color: rgba(255, 255, 255, .9);
-    background-color: rgba(255, 255, 255, .14);
+#gameOverlay .slot.sel,
+#gameOverlay .slot:hover,
+#gameOverlay .slot:focus-visible,
+#gameOverlay .slot.drag-target {
+    border-color: var(--ui-accent);
+    outline: none;
+    background: rgba(114, 198, 212, .16);
+    box-shadow: inset 0 0 0 1px var(--ui-accent);
+}
+
+#gameOverlay .slot:active {
+    transform: translateY(1px);
+}
+
+.slot.slot-transfer {
+    animation: slot-transfer-feedback 180ms ease-out;
+}
+
+@keyframes slot-transfer-feedback {
+    0% { transform: scale(.88); box-shadow: inset 0 0 0 2px var(--ui-accent); }
+    65% { transform: scale(1.06); }
+    100% { transform: scale(1); }
+}
+
+.transfer-ghost {
+    position: fixed;
+    z-index: 340;
+    width: 34px;
+    height: 34px;
+    pointer-events: none;
+    background-size: cover;
+    image-rendering: pixelated;
+    will-change: transform, opacity;
+}
+
+.transfer-ghost.cube-item-icon {
+    --cube-size: 22px;
+    --cube-depth: 11px;
+    perspective: 80px;
+}
+
+button,
+.btn {
+    transition: transform 70ms ease, filter 90ms ease;
+}
+
+button.pressed,
+.btn.pressed {
+    transform: translateY(1px) scale(.96);
+    filter: brightness(1.14);
+}
+
+button.released,
+.btn.released {
+    animation: button-release-feedback 150ms cubic-bezier(.2,.8,.2,1);
+}
+
+@keyframes button-release-feedback {
+    0% { transform: translateY(1px) scale(.96); filter: brightness(1.14); }
+    65% { transform: scale(1.035); }
+    100% { transform: scale(1); filter: brightness(1); }
 }
 
 #cursorStack {
@@ -446,13 +659,15 @@ input[type=range]::-webkit-slider-runnable-track {
 #gameCursor {
     position: fixed;
     z-index: 300;
+    top: 0;
+    left: 0;
     width: 18px;
     height: 24px;
-    transform: translate(-2px, -2px);
     background: #fff;
     clip-path: polygon(0 0, 0 85%, 24% 65%, 42% 100%, 58% 92%, 40% 60%, 72% 60%);
-    filter: drop-shadow(2px 2px 0 #000);
+    filter: drop-shadow(1px 1px 0 #000) drop-shadow(-1px -1px 0 #000);
     pointer-events: none;
+    will-change: transform;
 }
 
 #gameCursor[hidden] {
@@ -519,10 +734,13 @@ input[type=range]::-webkit-slider-runnable-track {
 }
 
 .recipe-list {
-    display: flex;
-    flex-direction: column;
-    gap: 8px;
-    height: 310px;
+    display: grid;
+    grid-template-columns: repeat(5, 44px);
+    grid-auto-rows: 44px;
+    align-content: start;
+    gap: 7px;
+    min-height: 44px;
+    max-height: 150px;
     overflow-y: auto;
     box-sizing: border-box;
     padding: 2px 7px 2px 2px;
@@ -531,8 +749,7 @@ input[type=range]::-webkit-slider-runnable-track {
 }
 
 #recipeSection {
-    height: 382px;
-    min-height: 382px;
+    min-height: 0;
     overflow: hidden;
 }
 
@@ -564,35 +781,162 @@ input[type=range]::-webkit-slider-runnable-track {
 }
 
 #recipeSearch:focus {
-    border-color: #eee;
+    border-color: var(--ui-accent);
 }
 
 .recipe {
-    display: flex;
-    align-items: flex-start;
-    gap: 10px;
-    width: 100%;
-    padding: 7px;
-    border: 2px solid #111;
-    background: #6f6f6f;
+    display: grid;
+    place-items: center;
+    width: 44px;
+    height: 44px;
+    padding: 3px;
+    border: 2px solid #555b5d;
+    background: #202325;
     color: #fff;
     font: inherit;
     text-align: left;
     cursor: pointer;
 }
 
+.recipe:hover:not(:disabled),
+.recipe:focus-visible,
+.recipe.selected {
+    border-color: var(--ui-accent);
+    outline: none;
+    background: #303638;
+}
+
+.recipe:active:not(:disabled) {
+    transform: translateY(1px);
+}
+
 .recipe:disabled {
-    opacity: .38;
-    filter: grayscale(1);
+    opacity: .56;
+    filter: grayscale(.7);
     cursor: not-allowed;
 }
 
 .recipe-output-icon {
-    width: 38px;
-    height: 38px;
+    width: 34px;
+    height: 34px;
     image-rendering: pixelated;
     flex: 0 0 auto;
     background-size: cover;
+}
+
+.recipe-output-icon.cube-item-icon {
+    --cube-size: 22px;
+    --cube-depth: 11px;
+    perspective: 80px;
+}
+
+.selected-recipe {
+    display: grid;
+    height: 58px;
+    box-sizing: border-box;
+    margin-bottom: 10px;
+    border: 2px solid #555b5d;
+    border-radius: 2px;
+    background-color: #25211d;
+    background-image: linear-gradient(rgba(31, 27, 24, .82), rgba(31, 27, 24, .82)), url("../textures/oak_planks.png");
+    background-size: auto, 48px 48px;
+}
+
+.selected-recipe[hidden] {
+    display: none;
+}
+
+.no-selected-recipe {
+    display: grid;
+    place-items: center;
+    height: 54px;
+    min-height: 0;
+    box-sizing: border-box;
+    padding: 6px 10px;
+    color: #aeb3b5;
+    text-align: center;
+}
+
+.selected-recipe-card {
+    display: block;
+    width: 100%;
+    height: 54px;
+    min-height: 0;
+    box-sizing: border-box;
+    padding: 6px 8px;
+    border: 0;
+    border-radius: 0;
+    background: transparent;
+    color: #fff;
+    font: inherit;
+    text-align: left;
+    cursor: pointer;
+}
+
+.selected-recipe-card:hover:not(:disabled),
+.selected-recipe-card:focus-visible {
+    border-color: var(--ui-accent);
+    outline: none;
+    box-shadow: inset 0 0 0 1px var(--ui-accent), 0 0 8px rgba(114, 198, 212, .45);
+}
+
+.selected-recipe-card:active:not(:disabled) {
+    transform: translateY(1px);
+}
+
+.recipe-flow {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    gap: 12px;
+}
+
+.recipe-flow-inputs {
+    display: flex;
+    flex-wrap: wrap;
+    justify-content: flex-end;
+    gap: 8px;
+}
+
+.recipe-flow-item {
+    display: flex;
+    align-items: center;
+    gap: 4px;
+    min-width: 48px;
+}
+
+.recipe-flow-item b {
+    color: #fff;
+    font-size: 13px;
+}
+
+.recipe-flow-icon {
+    width: 36px;
+    height: 36px;
+    flex: 0 0 36px;
+    background-size: cover;
+    image-rendering: pixelated;
+}
+
+.recipe-flow-icon.cube-item-icon {
+    --cube-size: 23px;
+    --cube-depth: 11px;
+    perspective: 80px;
+}
+
+.recipe-flow-arrow {
+    color: var(--ui-accent);
+    font: bold 25px/1 monospace;
+}
+
+.recipe.unavailable {
+    filter: grayscale(1) brightness(.52);
+}
+
+.recipe.unavailable:hover,
+.recipe.unavailable:focus-visible,
+.recipe.unavailable.selected {
+    filter: grayscale(.75) brightness(.68);
 }
 
 .recipe-copy,
@@ -607,7 +951,7 @@ input[type=range]::-webkit-slider-runnable-track {
 }
 
 .recipe-copy small {
-    color: #ddd;
+    color: #f2f2f2;
 }
 
 .recipe-requirements {
@@ -648,7 +992,7 @@ input[type=range]::-webkit-slider-runnable-track {
 }
 
 .requirement.available em {
-    color: #9bd47c;
+    color: #e4e8e9;
 }
 
 .requirement.missing em {
@@ -661,6 +1005,163 @@ input[type=range]::-webkit-slider-runnable-track {
     color: #aaa;
     border: 1px dashed #777;
     text-align: center;
+}
+
+.item-details {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    min-height: 58px;
+    box-sizing: border-box;
+    margin-bottom: 10px;
+    padding: 8px 10px;
+    border: 2px solid #555b5d;
+    background-color: #25211d;
+    background-image: linear-gradient(rgba(31, 27, 24, .86), rgba(31, 27, 24, .86)), url("../textures/oak_planks.png");
+    background-size: auto, 48px 48px;
+}
+
+#gameOverlay.inventory-menu .item-details,
+#gameOverlay.crafting-menu .item-details {
+    display: none;
+}
+
+#gameOverlay.storage-menu #recipeSection {
+    height: auto;
+    min-height: 0;
+}
+
+#gameOverlay.storage-menu .ui-columns {
+    grid-template-columns: 527px;
+    margin-top: 14px;
+}
+
+#gameOverlay.storage-menu .inventory-content {
+    padding: 0;
+    border: 0;
+    background: none;
+}
+
+#gameOverlay.storage-menu #stationPanel,
+#gameOverlay.storage-menu .ui-columns {
+    padding: 14px;
+    border: 3px solid #111;
+    background-color: #343638;
+    background-image: linear-gradient(rgba(35, 37, 39, .9), rgba(35, 37, 39, .9)), url("../textures/stone.png");
+    background-size: auto, 64px 64px;
+    box-shadow: inset 2px 2px #686b6d, inset -2px -2px #1c1d1e;
+}
+
+#gameOverlay.storage-menu .storage-panel-content,
+#gameOverlay.storage-menu .inventory-panel-content {
+    padding: 10px;
+    border: 2px solid #151515;
+    background: rgba(20, 21, 22, .72);
+}
+
+#gameOverlay.furnace-menu .ui-columns {
+    grid-template-columns: 527px;
+    margin-top: 14px;
+}
+
+#gameOverlay.furnace-menu #gameplayWindow,
+#gameOverlay.inventory-menu #gameplayWindow,
+#gameOverlay.crafting-menu #gameplayWindow {
+    padding: 0;
+    border: 0;
+    background: none;
+    box-shadow: none;
+}
+
+#gameOverlay.furnace-menu .inventory-content,
+#gameOverlay.inventory-menu .inventory-content,
+#gameOverlay.crafting-menu .inventory-content {
+    padding: 0;
+    border: 0;
+    background: none;
+}
+
+#gameOverlay.furnace-menu #stationPanel,
+#gameOverlay.furnace-menu .ui-columns,
+#gameOverlay.inventory-menu .inventory-center,
+#gameOverlay.inventory-menu #recipeSection,
+#gameOverlay.crafting-menu .inventory-center,
+#gameOverlay.crafting-menu #recipeSection {
+    padding: 14px;
+    border: 3px solid #111;
+    background-color: #343638;
+    background-image: linear-gradient(rgba(35, 37, 39, .9), rgba(35, 37, 39, .9)), url("../textures/stone.png");
+    background-size: auto, 64px 64px;
+    box-shadow: inset 2px 2px #686b6d, inset -2px -2px #1c1d1e;
+}
+
+#gameOverlay.furnace-menu .furnace-panel-content,
+#gameOverlay.furnace-menu .inventory-panel-content,
+#gameOverlay.inventory-menu .inventory-panel-content,
+#gameOverlay.inventory-menu .recipe-panel-content,
+#gameOverlay.crafting-menu .inventory-panel-content,
+#gameOverlay.crafting-menu .recipe-panel-content {
+    padding: 10px;
+    border: 2px solid #151515;
+    background: rgba(20, 21, 22, .72);
+}
+
+#gameOverlay.inventory-menu .ui-columns {
+    grid-template-columns: 561px minmax(255px, 1fr);
+    margin-top: 0;
+}
+
+#gameOverlay.crafting-menu .ui-columns {
+    grid-template-columns: 561px;
+    grid-template-areas: "crafting" "inventory";
+    margin-top: 0;
+}
+
+#gameOverlay.crafting-menu .inventory-center {
+    grid-area: inventory;
+}
+
+#gameOverlay.crafting-menu #recipeSection {
+    grid-area: crafting;
+}
+
+#gameOverlay.crafting-menu .inventory-tabs {
+    width: 100%;
+    flex-direction: row;
+    margin-bottom: 10px;
+    padding: 5px 7px;
+}
+
+#gameOverlay.crafting-menu .recipe-list {
+    grid-template-columns: repeat(10, 44px);
+}
+
+.item-details[hidden] {
+    visibility: hidden;
+}
+
+.item-details > span:last-child,
+.item-details strong,
+.item-details small {
+    display: block;
+}
+
+.item-details strong {
+    color: #fff;
+    font-size: 14px;
+}
+
+.item-details small {
+    margin-top: 3px;
+    color: #c9ced0;
+}
+
+.item-detail-icon {
+    width: 38px;
+    height: 38px;
+    flex: 0 0 38px;
+    background-size: cover;
+    image-rendering: pixelated;
 }
 
 .ui-help {
@@ -961,7 +1462,25 @@ input[type=range]::-webkit-slider-runnable-track {
 
 @media (max-width: 860px) {
     .game-overlay-shell { display: block; overflow: auto; }
-    .inventory-controls { width: 100%; margin-bottom: 12px; }
+    .inventory-workspace { flex-direction: column; }
+    .inventory-tabs {
+        width: auto;
+        flex: 0 0 48px;
+        flex-direction: row;
+    }
+    .inventory-actions {
+        width: fit-content;
+        margin: 2px 2px 10px;
+    }
+    .inventory-actions-wood { flex-direction: row; }
     .ui-columns { grid-template-columns: 1fr; }
-    .inventory-grid { grid-template-columns: repeat(6, 44px); }
+    .inventory-stack { width: 100%; }
+    .inventory-storage { grid-template-columns: repeat(6, 44px); }
+    .inventory-hotbar { grid-template-columns: repeat(10, 44px); overflow-x: auto; }
+    #gameOverlay.storage-menu .ui-columns,
+    #gameOverlay.inventory-menu .ui-columns,
+    #gameOverlay.crafting-menu .ui-columns,
+    #gameOverlay.furnace-menu .ui-columns { grid-template-columns: 1fr; }
+    #gameOverlay.storage-menu #stationPanel { overflow-x: auto; }
+    #recipeSection { min-height: 0; margin-top: 14px; }
 }

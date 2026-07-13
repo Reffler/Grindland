@@ -62,7 +62,7 @@ export const renderer = new WebGLRenderer({
     stencil: false,
     depth: true
 });
-renderer.setPixelRatio(Math.min(devicePixelRatio, 2));
+renderer.setPixelRatio(Math.min(devicePixelRatio, 1));
 renderer.setSize(innerWidth, innerHeight);
 renderer.outputColorSpace = SRGBColorSpace;
 renderer.toneMapping = ACESFilmicToneMapping;
@@ -183,29 +183,51 @@ export const skyDome = new Mesh(skyGeo, skyMat);
 scene.add(skyDome);
 
 function cloudTexture(seed) {
+    const columns = 4;
+    const rows = 2;
+    const cellSize = 128;
     const canvas = document.createElement("canvas");
-    canvas.width = canvas.height = 128;
+    canvas.width = cellSize * columns;
+    canvas.height = cellSize * rows;
     const context = canvas.getContext("2d");
     let state = seed;
     const random = () => {
         state = (state * 1664525 + 1013904223) >>> 0;
         return state / 4294967296;
     };
-    const blocks = [[16, 56, 96, 24]];
-    for (let i = 0; i < 7; i++) {
-        const width = (2 + Math.floor(random() * 4)) * 8;
-        const height = (1 + Math.floor(random() * 3)) * 8;
-        const x = (2 + Math.floor(random() * Math.max(1, 12 - width / 8))) * 8;
-        const y = (5 + Math.floor(random() * 3)) * 8;
-        blocks.push([x, y, width, height]);
-    }
-    context.fillStyle = "rgba(135,150,175,.9)";
-    for (const [x, y, width, height] of blocks) context.fillRect(x + 4, y + 6, width, height);
-    context.fillStyle = "rgba(215,225,238,.94)";
-    for (const [x, y, width, height] of blocks) context.fillRect(x, y, width, height);
-    context.fillStyle = "rgba(250,252,255,.72)";
-    for (const [x, y, width, height] of blocks) {
-        context.fillRect(x, y, width, Math.max(4, Math.floor(height * 0.35)));
+    for (let variant = 0; variant < columns * rows; variant++) {
+        const offsetX = variant % columns * cellSize;
+        const offsetY = Math.floor(variant / columns) * cellSize;
+        const baseWidth = (6 + Math.floor(random() * 7)) * 8;
+        const baseHeight = (2 + Math.floor(random() * 2)) * 8;
+        const baseX = Math.floor((cellSize - baseWidth) / 16) * 8;
+        const baseY = (7 + Math.floor(random() * 2)) * 8;
+        const blocks = [[baseX, baseY, baseWidth, baseHeight]];
+        const lobeCount = 3 + Math.floor(random() * 8);
+        for (let i = 0; i < lobeCount; i++) {
+            const width = (2 + Math.floor(random() * 5)) * 8;
+            const height = (1 + Math.floor(random() * 3)) * 8;
+            const x = (1 + Math.floor(random() * Math.max(1, 14 - width / 8))) * 8;
+            const y = (4 + Math.floor(random() * 4)) * 8;
+            blocks.push([x, y, width, height]);
+        }
+        context.fillStyle = "rgba(135,150,175,.9)";
+        for (const [x, y, width, height] of blocks) {
+            context.fillRect(offsetX + x + 4, offsetY + y + 6, width, height);
+        }
+        context.fillStyle = "rgba(215,225,238,.94)";
+        for (const [x, y, width, height] of blocks) {
+            context.fillRect(offsetX + x, offsetY + y, width, height);
+        }
+        context.fillStyle = "rgba(250,252,255,.72)";
+        for (const [x, y, width, height] of blocks) {
+            context.fillRect(
+                offsetX + x,
+                offsetY + y,
+                width,
+                Math.max(4, Math.floor(height * 0.35)),
+            );
+        }
     }
     const texture = new CanvasTexture(canvas);
     texture.colorSpace = SRGBColorSpace;
@@ -215,7 +237,6 @@ function cloudTexture(seed) {
     return texture;
 }
 
-const cloudStartTime = performance.now() * 0.001;
 const cloudLayers = [];
 const dayCloudColor = new Color(0xffffff);
 const sunsetCloudColor = new Color(0xffd1a3);
@@ -224,16 +245,34 @@ const currentCloudColor = new Color();
 function enableCloudSizes(material) {
     material.onBeforeCompile = (shader) => {
         shader.vertexShader = shader.vertexShader
-            .replace("uniform float size;", "uniform float size;\nattribute float cloudSize;")
-            .replace("gl_PointSize = size;", "gl_PointSize = size * cloudSize;");
+            .replace(
+                "uniform float size;",
+                "uniform float size;\nattribute float cloudSize;\nattribute float cloudVariant;\nvarying float vCloudVariant;",
+            )
+            .replace(
+                "gl_PointSize = size;",
+                "vCloudVariant = cloudVariant;\ngl_PointSize = size * cloudSize;",
+            );
+        shader.fragmentShader = shader.fragmentShader
+            .replace(
+                "uniform vec3 diffuse;",
+                "uniform vec3 diffuse;\nvarying float vCloudVariant;",
+            )
+            .replace("#include <map_particle_fragment>", `
+                vec2 cloudUv = (uvTransform * vec3(gl_PointCoord.x, 1.0 - gl_PointCoord.y, 1.0)).xy;
+                vec2 cloudCell = vec2(mod(vCloudVariant, 4.0), floor(vCloudVariant / 4.0));
+                cloudUv = (cloudUv + cloudCell) / vec2(4.0, 2.0);
+                diffuseColor *= texture2D(map, cloudUv);
+            `);
     };
-    material.customProgramCacheKey = () => "clustered-cloud-size-v1";
+    material.customProgramCacheKey = () => "clustered-cloud-atlas-v2";
 }
 
 function createCloudLayer(index, count, size, speed, radius) {
     const positions = [];
     const colors = [];
     const sizes = [];
+    const variants = [];
     let state = 971 + index * 1597;
     const random = () => {
         state = (state * 1664525 + 1013904223) >>> 0;
@@ -259,11 +298,13 @@ function createCloudLayer(index, count, size, speed, radius) {
         const shade = 0.9 + ((i * 37 + index * 11) % 10) * 0.01;
         colors.push(shade, shade, shade);
         sizes.push(0.58 + random() * 1.05);
+        variants.push((i * 5 + Math.floor(random() * 8)) % 8);
     }
     const geometry = new BufferGeometry();
     geometry.setAttribute("position", new Float32BufferAttribute(positions, 3));
     geometry.setAttribute("color", new Float32BufferAttribute(colors, 3));
     geometry.setAttribute("cloudSize", new Float32BufferAttribute(sizes, 1));
+    geometry.setAttribute("cloudVariant", new Float32BufferAttribute(variants, 1));
     const texture = cloudTexture(431 + index * 977);
     const material = new PointsMaterial({
         map: texture,
@@ -305,7 +346,14 @@ function createCloudLayer(index, count, size, speed, radius) {
     excludeCutoutFromNormalPass(points);
     layer.add(depthPoints, points);
     skyDome.add(layer);
-    cloudLayers.push({ points: layer, material, speed, baseOpacity: material.opacity });
+    cloudLayers.push({
+        points: layer,
+        material,
+        depthMaterial,
+        speed,
+        baseOpacity: material.opacity,
+        baseSize: size,
+    });
 }
 
 createCloudLayer(0, 24, 48, 0.006, 334);
@@ -517,7 +565,7 @@ const smootherstep = (t) => t * t * t * (t * (t * 6 - 15) + 10);
  * Extended golden hour for longer sunrise/sunset transitions
  * @param {number} dayProgress - 0 to 1 representing progress through the day
  */
-export function updateSkyColors(dayProgress) {
+export function updateSkyColors(dayProgress, worldTime = 0) {
     dayProgress = dayProgress % 1;
     if (dayProgress < 0) dayProgress += 1;
 
@@ -568,13 +616,17 @@ export function updateSkyColors(dayProgress) {
     // --- Time Factors ---
     const dayFactor = Math.max(0, Math.min(1, (sunHeight + 0.2) / 1.2));
     const nightFactor = Math.max(0, Math.min(1, (-sunHeight + 0.2) / 1.2));
-    const cloudTime = performance.now() * 0.001 - cloudStartTime;
+    const cloudTime = worldTime;
+    const cloudZoomScale = Math.tan(fov * Math.PI / 360) /
+        Math.tan(camera.fov * Math.PI / 360);
     currentCloudColor.copy(nightCloudColor).lerp(dayCloudColor, dayFactor);
     currentCloudColor.lerp(sunsetCloudColor, goldenIntensity * 0.55);
     for (const layer of cloudLayers) {
         layer.points.rotation.y = cloudTime * layer.speed;
         layer.material.color.copy(currentCloudColor);
         layer.material.opacity = layer.baseOpacity * (0.58 + dayFactor * 0.42);
+        layer.material.size = layer.baseSize * cloudZoomScale;
+        layer.depthMaterial.size = layer.baseSize * cloudZoomScale;
     }
 
     // --- Sun/Moon Horizon Fade ---
@@ -715,4 +767,34 @@ export function updateZoom(dt, active) {
     if (Math.abs(nextFov - camera.fov) < 0.001) return;
     camera.fov = nextFov;
     camera.updateProjectionMatrix();
+}
+
+export function disposeGraphics() {
+    renderer.setAnimationLoop(null);
+
+    const geometries = new Set();
+    const materials = new Set();
+    const textures = new Set();
+    scene.traverse((object) => {
+        if (object.geometry) geometries.add(object.geometry);
+        const objectMaterials = Array.isArray(object.material)
+            ? object.material
+            : [object.material];
+        for (const material of objectMaterials) {
+            if (!material) continue;
+            materials.add(material);
+            for (const value of Object.values(material)) {
+                if (value?.isTexture) textures.add(value);
+            }
+        }
+    });
+
+    for (const geometry of geometries) geometry.dispose();
+    for (const material of materials) material.dispose();
+    for (const texture of textures) texture.dispose();
+    sun.shadow.dispose();
+    moon.shadow.dispose();
+    composer.dispose();
+    renderer.dispose();
+    renderer.forceContextLoss();
 }

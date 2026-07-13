@@ -120,3 +120,9 @@ export const BLOCK_ICON = {
     [CHEST]: cube("./textures/chest_side.png", "./textures/chest_side.png", "./textures/chest_front.png"),
     [PLANKS]: cube("./textures/oak_planks.png"),
 };
+
+export function disposeMaterialAssets() {
+    for (const material of Object.values(MAT)) material.dispose();
+    for (const texture of Object.values(TEX)) texture.dispose();
+    for (const texture of DESTROY) texture.dispose();
+}

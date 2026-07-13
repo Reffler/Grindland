@@ -5,11 +5,24 @@ import { world } from "./world.js";
 import { BLOCKS, ITEMS, blockMaterial } from "../registries.js";
 
 const geometry = new THREE.BoxGeometry(1, 1, 1);
+const MAX_PARTICLES = 256;
 const particles = [];
 const paletteCache = new Map();
-const materialCache = new Map();
 const sampleCanvas = document.createElement("canvas");
 const sampleContext = sampleCanvas.getContext("2d", { willReadFrequently: true });
+const particleMaterial = new THREE.MeshStandardMaterial({
+    color: 0xffffff,
+    roughness: 0.9,
+    metalness: 0,
+});
+const particleMesh = new THREE.InstancedMesh(geometry, particleMaterial, MAX_PARTICLES);
+const particleTransform = new THREE.Object3D();
+const particleColorValue = new THREE.Color();
+particleMesh.instanceMatrix.setUsage(THREE.DynamicDrawUsage);
+particleMesh.count = 0;
+particleMesh.frustumCulled = false;
+scene.add(particleMesh);
+let colorsDirty = false;
 
 function textureKeys(id) {
     const material = BLOCKS[id]?.material;
@@ -43,17 +56,9 @@ function blockPalette(id) {
     return palette.length ? palette : [ITEMS[id]?.color ?? 0x888888];
 }
 
-function particleMaterial(id) {
+function particleColor(id) {
     const palette = blockPalette(id);
-    const key = palette[Math.floor(Math.random() * palette.length)];
-    if (!materialCache.has(key)) {
-        materialCache.set(key, new THREE.MeshStandardMaterial({
-            color: key,
-            roughness: 0.9,
-            metalness: 0,
-        }));
-    }
-    return materialCache.get(key);
+    return palette[Math.floor(Math.random() * palette.length)];
 }
 
 export function spawnBlockParticles(target, face = [0, 1, 0], fullBreak = false) {
@@ -61,18 +66,18 @@ export function spawnBlockParticles(target, face = [0, 1, 0], fullBreak = false)
     const center = new THREE.Vector3(target.x + 0.5, target.y + 0.5, target.z + 0.5);
     const normal = new THREE.Vector3(...face);
 
-    for (let i = 0; i < count; i++) {
-        const mesh = new THREE.Mesh(geometry, particleMaterial(target.id));
+    for (let i = 0; i < count && particles.length < MAX_PARTICLES; i++) {
         const size = 0.028 + Math.random() * (Math.random() < 0.2 ? 0.052 : 0.026);
-        mesh.scale.setScalar(size);
-        mesh.position.copy(center).add(new THREE.Vector3(
+        const position = new THREE.Vector3().copy(center).add(new THREE.Vector3(
             (Math.random() - 0.5) * 0.72,
             (Math.random() - 0.5) * 0.72,
             (Math.random() - 0.5) * 0.72,
         ));
-        if (!fullBreak) mesh.position.addScaledVector(normal, 0.48);
-        mesh.rotation.set(Math.random() * Math.PI, Math.random() * Math.PI, Math.random() * Math.PI);
-        scene.add(mesh);
+        if (!fullBreak) position.addScaledVector(normal, 0.48);
+        const color = particleColor(target.id);
+        particleColorValue.setHex(color);
+        particleMesh.setColorAt(particles.length, particleColorValue);
+        colorsDirty = true;
 
         const velocity = new THREE.Vector3(
             (Math.random() - 0.5) * (fullBreak ? 3.8 : 1.6),
@@ -80,7 +85,13 @@ export function spawnBlockParticles(target, face = [0, 1, 0], fullBreak = false)
             (Math.random() - 0.5) * (fullBreak ? 3.8 : 1.6),
         ).addScaledVector(normal, fullBreak ? 0.8 : 1.1);
         particles.push({
-            mesh,
+            position,
+            rotation: new THREE.Euler(
+                Math.random() * Math.PI,
+                Math.random() * Math.PI,
+                Math.random() * Math.PI,
+            ),
+            color,
             size,
             velocity,
             spin: new THREE.Vector3(
@@ -99,31 +110,36 @@ export function updateBlockParticles(dt) {
         const particle = particles[i];
         particle.age += dt;
         if (particle.age >= particle.lifetime) {
-            scene.remove(particle.mesh);
-            particles.splice(i, 1);
+            const last = particles.pop();
+            if (i < particles.length) {
+                particles[i] = last;
+                particleColorValue.setHex(last.color);
+                particleMesh.setColorAt(i, particleColorValue);
+                colorsDirty = true;
+            }
             continue;
         }
         particle.velocity.y -= 10.5 * dt;
-        particle.mesh.position.x += particle.velocity.x * dt;
-        particle.mesh.position.z += particle.velocity.z * dt;
-        const nextY = particle.mesh.position.y + particle.velocity.y * dt;
+        particle.position.x += particle.velocity.x * dt;
+        particle.position.z += particle.velocity.z * dt;
+        const nextY = particle.position.y + particle.velocity.y * dt;
         const blockY = Math.floor(nextY - particle.size * 0.5);
         if (particle.velocity.y < 0 && world.isSolid(
-            Math.floor(particle.mesh.position.x),
+            Math.floor(particle.position.x),
             blockY,
-            Math.floor(particle.mesh.position.z),
+            Math.floor(particle.position.z),
         )) {
-            particle.mesh.position.y = blockY + 1 + particle.size * 0.5;
+            particle.position.y = blockY + 1 + particle.size * 0.5;
             particle.velocity.y *= -0.32;
             particle.velocity.x *= 0.72;
             particle.velocity.z *= 0.72;
             if (particle.velocity.y < 0.35) particle.velocity.y = 0;
         } else {
-            particle.mesh.position.y = nextY;
+            particle.position.y = nextY;
         }
-        particle.mesh.rotation.x += particle.spin.x * dt;
-        particle.mesh.rotation.y += particle.spin.y * dt;
-        particle.mesh.rotation.z += particle.spin.z * dt;
+        particle.rotation.x += particle.spin.x * dt;
+        particle.rotation.y += particle.spin.y * dt;
+        particle.rotation.z += particle.spin.z * dt;
 
         const exit = THREE.MathUtils.clamp(
             (particle.age / particle.lifetime - 0.65) / 0.35,
@@ -131,6 +147,27 @@ export function updateBlockParticles(dt) {
             1,
         );
         const shrink = Math.max(0, 1 - exit + Math.sin(exit * Math.PI * 4) * 0.08 * (1 - exit));
-        particle.mesh.scale.setScalar(particle.size * shrink);
+        particle.currentSize = particle.size * shrink;
+    }
+
+    particleMesh.count = particles.length;
+    for (let i = 0; i < particles.length; i++) {
+        const particle = particles[i];
+        particleTransform.position.copy(particle.position);
+        particleTransform.rotation.copy(particle.rotation);
+        particleTransform.scale.setScalar(particle.currentSize ?? particle.size);
+        particleTransform.updateMatrix();
+        particleMesh.setMatrixAt(i, particleTransform.matrix);
+    }
+    if (particles.length) {
+        particleMesh.instanceMatrix.clearUpdateRanges();
+        particleMesh.instanceMatrix.addUpdateRange(0, particles.length * 16);
+        particleMesh.instanceMatrix.needsUpdate = true;
+    }
+    if (colorsDirty && particleMesh.instanceColor) {
+        particleMesh.instanceColor.clearUpdateRanges();
+        particleMesh.instanceColor.addUpdateRange(0, particles.length * 3);
+        particleMesh.instanceColor.needsUpdate = true;
+        colorsDirty = false;
     }
 }

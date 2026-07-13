@@ -6,6 +6,8 @@ export const keys = Object.create(null);
 export let sensitivity = 0.0025;
 export let sprinting = false;
 let lastForwardTap = -Infinity;
+let accumulatedLookX = 0;
+let accumulatedLookY = 0;
 
 export function setSensitivity(val) {
     sensitivity = val;
@@ -52,14 +54,35 @@ const canvas = renderer.domElement;
 export const locked = () => document.pointerLockElement === canvas;
 
 addEventListener("contextmenu", (e) => {
-    if (locked()) e.preventDefault();
+    e.preventDefault();
 });
 addEventListener("mousemove", (e) => {
     if (!locked() || document.body.classList.contains("game-ui-open")) return;
-    player.yaw -= e.movementX * sensitivity;
-    player.pitch -= e.movementY * sensitivity;
+    accumulatedLookX += e.movementX;
+    accumulatedLookY += e.movementY;
+}, { passive: true });
+
+export function consumeLookInput() {
+    player.yaw -= accumulatedLookX * sensitivity;
+    player.pitch -= accumulatedLookY * sensitivity;
+    accumulatedLookX = 0;
+    accumulatedLookY = 0;
     player.pitch = Math.max(
         -Math.PI / 2 + 0.001,
         Math.min(Math.PI / 2 - 0.001, player.pitch),
     );
+}
+
+function resetTransientInput() {
+    accumulatedLookX = 0;
+    accumulatedLookY = 0;
+    sprinting = false;
+    for (const code of Object.keys(keys)) keys[code] = false;
+}
+
+document.addEventListener("pointerlockchange", () => {
+    accumulatedLookX = 0;
+    accumulatedLookY = 0;
+    if (!locked()) resetTransientInput();
 });
+addEventListener("blur", resetTransientInput);

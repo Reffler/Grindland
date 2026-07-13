@@ -1,14 +1,17 @@
-import { camera, scene, sun, sunMesh, sunGlow, moon, moonMesh, moonGlow, renderer, composer, skyDome, updateSkyColors, updateZoom } from "./Graphics/setup.js";
+import { camera, scene, sun, sunMesh, sunGlow, moon, moonMesh, moonGlow, renderer, composer, skyDome, updateSkyColors, updateZoom, disposeGraphics } from "./Graphics/setup.js";
 import { world } from "./Graphics/world.js";
-import { renderHeldItem, updateHeldItem } from "./Graphics/heldItem.js";
+import { disposeHeldItem, renderHeldItem, updateHeldItem } from "./Graphics/heldItem.js";
+import { disposeItemVoxelAssets } from "./Graphics/itemVoxel.js";
+import { disposeMaterialAssets } from "./Graphics/materials.js";
 import { buildSkyblockWithTree } from "./WorldGen/island.js";
 import { player, updatePlayer, setSpawnPoint } from "./Player/player.js";
 import { updateInteraction } from "./Player/interaction.js";
-import { keys } from "./Player/input.js";
+import { consumeLookInput, keys } from "./Player/input.js";
 import { updateEnvironment } from "./Mechanics/environment.js";
-import { updateItemDrops } from "./Mechanics/itemDrops.js";
+import { disposeItemDrops, updateItemDrops } from "./Mechanics/itemDrops.js";
 import { updateFurnaces } from "./Mechanics/stations.js";
 import { updateBlockParticles } from "./Graphics/blockParticles.js";
+import { spawnGoblin } from "./Entities/goblin.js";
 import { initUI, gameState, updateFPS, setPlayerAndSpawn, isGameplayUIOpen } from "./Hud/ui.js";
 import { STATE_MAIN, STATE_PLAY, STATE_PAUSE, DAY_DURATION, CELESTIAL_RADIUS } from "./constants.js";
 import * as THREE from "three";
@@ -38,8 +41,14 @@ initUI();
 let dayTime = DAY_DURATION * 0.25; // Start at sunrise (0.25 of cycle)
 
 window.addEventListener("game-command", (event) => {
-    if (event.detail?.type !== "time") return;
-    dayTime = DAY_DURATION * (event.detail.value === "night" ? 0.75 : 0.25);
+    if (event.detail?.type === "time") {
+        dayTime = DAY_DURATION * (event.detail.value === "night" ? 0.75 : 0.25);
+    } else if (event.detail?.type === "spawn" && event.detail.value === "goblin") {
+        const position = player.pos.clone();
+        position.x -= Math.sin(player.yaw) * 2;
+        position.z -= Math.cos(player.yaw) * 2;
+        spawnGoblin(position, player.yaw + Math.PI).catch(console.error);
+    }
 });
 
 /**
@@ -88,7 +97,7 @@ function updateCelestialBodies(center, time) {
     moon.intensity = 0.4 * Math.pow(nightIntensity, 0.5);
 
     // Update sky colors based on time
-    updateSkyColors(dayProgress);
+    updateSkyColors(dayProgress, time);
 
     // Keep sky dome centered on camera
     skyDome.position.copy(camera.position);
@@ -104,16 +113,15 @@ function renderFrame() {
     renderHeldItem();
 }
 
-function tick() {
-    const now = performance.now();
+function tick(now) {
     let dt = (now - last) / 1000;
     last = now;
     if (dt > 0.05) dt = 0.05;
     updateZoom(dt, gameState === STATE_PLAY && keys.KeyC && !isGameplayUIOpen());
     updateHeldItem(dt, gameState === STATE_PLAY && !isGameplayUIOpen());
 
-    // Update day time
-    dayTime += dt;
+    const gameplayUIOpen = isGameplayUIOpen();
+    if (gameState !== STATE_PLAY || !gameplayUIOpen) dayTime += dt;
 
     // Main Menu Camera Orbit
     if (gameState === STATE_MAIN) {
@@ -129,24 +137,25 @@ function tick() {
         updateCelestialBodies(SPAWN, dayTime);
 
         renderFrame();
-        requestAnimationFrame(tick);
         return;
     }
 
     // Pause State
     if (gameState === STATE_PAUSE) {
         renderFrame();
-        requestAnimationFrame(tick);
         return;
     }
 
     // Play State
-    if (!isGameplayUIOpen()) updatePlayer(dt);
+    if (!gameplayUIOpen) {
+        consumeLookInput();
+        updatePlayer(dt);
+    }
 
     // Update sun/moon centered on player
     updateCelestialBodies(player.pos, dayTime);
 
-    if (!isGameplayUIOpen()) updateInteraction(dt);
+    if (!gameplayUIOpen) updateInteraction(dt);
     updateEnvironment(dt);
     updateBlockParticles(dt);
     updateItemDrops(dt);
@@ -160,7 +169,15 @@ function tick() {
         frames = 0;
         acc = 0;
     }
-    requestAnimationFrame(tick);
 }
 
-requestAnimationFrame(tick);
+renderer.setAnimationLoop(tick);
+
+addEventListener("pagehide", (event) => {
+    if (event.persisted) return;
+    disposeItemDrops();
+    disposeHeldItem();
+    disposeItemVoxelAssets();
+    disposeMaterialAssets();
+    disposeGraphics();
+});

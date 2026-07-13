@@ -6,8 +6,13 @@ export const inv = Array.from({ length: INV_SIZE }, emptySlot);
 export let sel = 0;
 
 let changeCallback = null;
+let selectionCallback = null;
 export function setHotbarCallback(cb) {
     changeCallback = cb;
+}
+
+export function setSelectionCallback(cb) {
+    selectionCallback = cb;
 }
 
 export function inventoryChanged() {
@@ -16,7 +21,7 @@ export function inventoryChanged() {
 
 export function updateSel(newSel) {
     sel = ((newSel % HOTBAR_SIZE) + HOTBAR_SIZE) % HOTBAR_SIZE;
-    inventoryChanged();
+    if (selectionCallback) selectionCallback();
 }
 
 export function maxStack(id) {

@@ -84,3 +84,12 @@ export function getItemVoxelAsset(id, onReady = null) {
     image.src = ITEMS[id].icon;
     return null;
 }
+
+export function disposeItemVoxelAssets() {
+    for (const asset of assets.values()) {
+        asset.geometry.dispose();
+        asset.material.dispose();
+    }
+    assets.clear();
+    pending.clear();
+}

@@ -1,4 +1,5 @@
 import * as THREE from "three";
+import { mergeGeometries } from "three/addons/utils/BufferGeometryUtils.js";
 import { AIR } from "../constants.js";
 import { BLOCK_ICON } from "./materials.js";
 import { getItemVoxelAsset } from "./itemVoxel.js";
@@ -38,28 +39,46 @@ punchRig.add(actionRig);
 actionRig.add(swapRig);
 swapRig.add(itemHolder);
 
-function faceMaterials(colors) {
-    return colors.map(color => new THREE.MeshStandardMaterial({
-        color,
-        roughness: 0.78,
-        metalness: 0,
-    }));
+function coloredBox(width, height, depth, colors) {
+    const geometry = new THREE.BoxGeometry(width, height, depth);
+    const values = new Float32Array(geometry.attributes.position.count * 3);
+    const color = new THREE.Color();
+    for (const group of geometry.groups) {
+        color.setHex(colors[group.materialIndex]);
+        const end = group.start + group.count;
+        for (let i = group.start; i < end; i++) {
+            const vertex = geometry.index ? geometry.index.getX(i) : i;
+            values[vertex * 3] = color.r;
+            values[vertex * 3 + 1] = color.g;
+            values[vertex * 3 + 2] = color.b;
+        }
+    }
+    geometry.setAttribute("color", new THREE.BufferAttribute(values, 3));
+    geometry.clearGroups();
+    return geometry;
 }
 
-const sleeve = new THREE.Mesh(
-    new THREE.BoxGeometry(0.36, 0.36, 1.48),
-    faceMaterials([0x315c86, 0x426f99, 0x5786ae, 0x294d72, 0x3c6b95, 0x294f75]),
+const sleeveGeometry = coloredBox(
+    0.36, 0.36, 1.48,
+    [0x315c86, 0x426f99, 0x5786ae, 0x294d72, 0x3c6b95, 0x294f75],
 );
-sleeve.position.z = -0.04;
-
-const hand = new THREE.Mesh(
-    new THREE.BoxGeometry(0.4, 0.4, 0.4),
-    faceMaterials([0xc98260, 0xb66f52, 0xe4aa82, 0xa96149, 0xd99770, 0xb96f51]),
+const handGeometry = coloredBox(
+    0.4, 0.4, 0.4,
+    [0xc98260, 0xb66f52, 0xe4aa82, 0xa96149, 0xd99770, 0xb96f51],
 );
-hand.position.z = -0.82;
+sleeveGeometry.translate(0, 0, -0.04);
+handGeometry.translate(0, 0, -0.82);
+const armGeometry = mergeGeometries([sleeveGeometry, handGeometry]);
+sleeveGeometry.dispose();
+handGeometry.dispose();
+const armMesh = new THREE.Mesh(armGeometry, new THREE.MeshStandardMaterial({
+    vertexColors: true,
+    roughness: 0.78,
+    metalness: 0,
+}));
 
 const arm = new THREE.Group();
-arm.add(sleeve, hand);
+arm.add(armMesh);
 arm.rotation.set(0.43, 0.3, 0.08);
 swapRig.add(arm);
 
@@ -378,6 +397,16 @@ export function updateHeldItem(dt, visible = true) {
         - lookYaw * 0.012;
 }
 
+function updateHeldLight(source, target, exposure) {
+    target.color.copy(source.color);
+    target.intensity = source.intensity * exposure;
+    lightDirection.copy(source.position)
+        .sub(player.pos)
+        .applyQuaternion(inverseCameraRotation)
+        .normalize();
+    target.position.copy(lightDirection);
+}
+
 export function renderHeldItem() {
     if (!isVisible) return;
     heldAmbient.color.copy(ambientLight.color);
@@ -387,21 +416,22 @@ export function renderHeldItem() {
     heldHemisphere.intensity = hemiLight.intensity;
 
     inverseCameraRotation.copy(camera.quaternion).invert();
-    for (const [source, target, exposure] of [[sun, heldSun, sunExposure], [moon, heldMoon, moonExposure]]) {
-        target.color.copy(source.color);
-        target.intensity = source.intensity * exposure;
-        lightDirection.copy(source.position)
-            .sub(player.pos)
-            .applyQuaternion(inverseCameraRotation)
-            .normalize();
-        target.position.copy(lightDirection);
-    }
+    updateHeldLight(sun, heldSun, sunExposure);
+    updateHeldLight(moon, heldMoon, moonExposure);
 
     const autoClear = renderer.autoClear;
     renderer.autoClear = false;
     renderer.clearDepth();
     renderer.render(heldScene, heldCamera);
     renderer.autoClear = autoClear;
+}
+
+export function disposeHeldItem() {
+    clearItem();
+    armGeometry.dispose();
+    armMesh.material.dispose();
+    for (const texture of textures.values()) texture.dispose();
+    textures.clear();
 }
 
 addEventListener("resize", () => {

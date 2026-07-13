@@ -1,12 +1,12 @@
 import { BLOCK_ICON, ICON } from "../Graphics/materials.js";
 import {
     AIR, DIRT, GRASS, STONE, LOG, LEAVES, INFECTED_LEAVES,
-    COBBLESTONE, CRAFTING_TABLE, FURNACE, CHEST, PLANKS,
+    COBBLESTONE, CRAFTING_TABLE, FURNACE, CHEST, PLANKS, CROOK, STRING,
     HARD, HOTBAR_SIZE, INV_SIZE,
     STATE_MAIN, STATE_PLAY,
 } from "../constants.js";
 import {
-    inv, sel, updateSel, setHotbarCallback, inventoryChanged, countItem,
+    inv, sel, updateSel, setHotbarCallback, setSelectionCallback, inventoryChanged, countItem,
     canCraft, craft, maxStack, addToSlots,
 } from "../Player/inventory.js";
 import { BLOCKS, ITEMS, RECIPES } from "../registries.js";
@@ -30,9 +30,14 @@ const overlayEl = document.createElement("div");
 overlayEl.id = "gameOverlay";
 overlayEl.innerHTML = `
     <div class="game-overlay-shell">
-        <aside id="inventoryControls" class="inventory-controls">
-            <button class="btn" id="inventoryResumeBtn" type="button">Resume Game</button>
-            <button class="btn" id="inventoryMenuBtn" type="button">Main Menu</button>
+        <nav class="inventory-actions" aria-label="Game actions">
+            <div class="inventory-actions-wood">
+                <button class="inventory-action" id="inventorySettingsBtn" type="button" title="Settings" aria-label="Settings">⚙</button>
+                <button class="inventory-action" id="inventoryMenuBtn" type="button" title="Main menu" aria-label="Main menu">⌂</button>
+            </div>
+        </nav>
+        <section id="gameSettingsWindow" class="game-window settings-window" hidden>
+            <h3>Settings</h3>
             <div class="settings-container">
                 <div class="setting-row">
                     <div class="setting-label">Sensitivity <input type="number" id="sensInput" value="25" min="1" max="100"></div>
@@ -43,15 +48,31 @@ overlayEl.innerHTML = `
                     <input type="range" id="fovSlider" min="30" max="110" value="70">
                 </div>
             </div>
-        </aside>
-        <section class="game-window">
-            <div id="stationPanel"></div>
-            <div class="ui-columns">
-                <section><div id="inventoryGrid" class="slot-grid inventory-grid"></div></section>
-                <section id="recipeSection">
-                    <input id="recipeSearch" type="search" placeholder="Search recipes…" autocomplete="off" aria-label="Search recipes">
-                    <div id="recipeList" class="recipe-list"></div>
-                </section>
+            <button class="btn" id="inventorySettingsBackBtn" type="button">Back</button>
+        </section>
+        <section id="gameplayWindow" class="game-window">
+            <div class="inventory-workspace">
+                <div class="inventory-content">
+                    <div id="stationPanel"></div>
+                    <div class="ui-columns">
+                        <section class="inventory-center"><div class="inventory-panel-content"><h3 id="playerInventoryTitle" hidden>Inventory</h3><div id="inventoryGrid" class="inventory-stack"></div></div></section>
+                        <aside id="recipeSection">
+                            <div class="recipe-panel-content">
+                                <h3 id="recipeTitle" hidden>Crafting Table</h3>
+                                <nav id="inventoryTabs" class="inventory-tabs" aria-label="Inventory categories">
+                                    <button class="inventory-tab active" type="button" data-category="all" title="All recipes" aria-label="All recipes"></button>
+                                    <button class="inventory-tab" type="button" data-category="blocks" title="Blocks" aria-label="Blocks"></button>
+                                    <button class="inventory-tab" type="button" data-category="tools" title="Tools" aria-label="Tools"></button>
+                                    <button class="inventory-tab" type="button" data-category="items" title="Items" aria-label="Items"></button>
+                                </nav>
+                                <div id="selectedRecipe" class="selected-recipe"></div>
+                                <div id="selectedItemDetails" class="item-details"></div>
+                                <input id="recipeSearch" type="search" placeholder="Search recipes…" autocomplete="off" aria-label="Search recipes">
+                                <div id="recipeList" class="recipe-list"></div>
+                            </div>
+                        </aside>
+                    </div>
+                </div>
             </div>
         </section>
     </div>`;
@@ -86,7 +107,13 @@ const inventoryGridEl = document.getElementById("inventoryGrid");
 const recipeSectionEl = document.getElementById("recipeSection");
 const recipeSearchEl = document.getElementById("recipeSearch");
 const recipeListEl = document.getElementById("recipeList");
-const inventoryControlsEl = document.getElementById("inventoryControls");
+const inventoryTabsEl = document.getElementById("inventoryTabs");
+const playerInventoryTitleEl = document.getElementById("playerInventoryTitle");
+const recipeTitleEl = document.getElementById("recipeTitle");
+const selectedItemDetailsEl = document.getElementById("selectedItemDetails");
+const selectedRecipeEl = document.getElementById("selectedRecipe");
+const gameplayWindowEl = document.getElementById("gameplayWindow");
+const gameSettingsWindowEl = document.getElementById("gameSettingsWindow");
 const chatMessagesEl = document.getElementById("chatMessages");
 const chatInputEl = document.getElementById("chatInput");
 
@@ -96,6 +123,14 @@ const cursorStack = { id: AIR, count: 0 };
 let hoveredSlot = null;
 let dragState = null;
 let lastSlotClick = null;
+let settingsOpen = false;
+let recipeCategory = "all";
+let detailItemId = AIR;
+let selectedRecipeId = null;
+let lastUsedRecipeId = null;
+let shiftTransferState = null;
+let shiftHeld = false;
+const transferFeedbackKeys = new Set();
 const mockCursor = {
     x: innerWidth / 2,
     y: innerHeight / 2,
@@ -104,6 +139,7 @@ const mockCursor = {
     range: null,
 };
 let suppressPause = false;
+let rawPointerLock = false;
 let playerRef = null;
 let spawnRef = null;
 let toastTimer = null;
@@ -154,6 +190,17 @@ function runChatCommand(raw) {
         addChatMessage(`Set time to ${parts[2]}`);
         return;
     }
+    if (parts[0] === "/spawn" && parts[1] === "goblin" && parts.length === 2) {
+        if (!cheatsEnabled) {
+            addChatMessage("Cheats are disabled", true);
+            return;
+        }
+        window.dispatchEvent(new CustomEvent("game-command", {
+            detail: { type: "spawn", value: "goblin" },
+        }));
+        addChatMessage("Spawned goblin");
+        return;
+    }
     addChatMessage("Unknown command", true);
 }
 
@@ -171,19 +218,17 @@ function openChat() {
     chatEl.classList.add("open");
     document.body.classList.add("game-ui-open");
     crossEl.style.display = "none";
-    if (document.pointerLockElement) document.exitPointerLock();
     chatInputEl.value = "";
     chatInputEl.focus();
 }
 
-function closeChat(relock = true) {
+function closeChat() {
     if (!chatOpen) return;
     chatOpen = false;
     chatEl.classList.remove("open");
     if (!gameplayOverlay) document.body.classList.remove("game-ui-open");
     chatInputEl.blur();
     crossEl.style.display = gameState === STATE_PLAY && !gameplayOverlay ? "block" : "none";
-    if (relock && gameState === STATE_PLAY && document.pointerLockElement !== canvas) requestLock();
 }
 
 function displayToast(message, failure = false) {
@@ -266,8 +311,8 @@ window.addEventListener("game-toast", (event) => {
 export function setUIState(state) {
     gameState = state;
     if (state !== STATE_PLAY) {
-        closeGameplayUI(false);
-        closeChat(false);
+        closeGameplayUI();
+        closeChat();
     }
     mainMenuEl.style.display = state === STATE_MAIN ? "flex" : "none";
     mainOptionsEl.style.display = "none";
@@ -297,6 +342,15 @@ export function drawHotbar() {
     }
 }
 
+function updateHotbarSelection() {
+    hotbarEl.children[lastNamedSlot]?.classList.remove("sel");
+    hotbarEl.children[sel]?.classList.add("sel");
+    if (sel !== lastNamedSlot) {
+        lastNamedSlot = sel;
+        showItemName(inv[sel]?.id);
+    }
+}
+
 function makeSlot(slot, selected = false, ref = null) {
     const element = document.createElement("button");
     element.type = "button";
@@ -306,19 +360,30 @@ function makeSlot(slot, selected = false, ref = null) {
         element.dataset.container = ref.container;
         element.dataset.index = ref.index;
         const key = refKey(ref);
+        if (transferFeedbackKeys.has(key)) element.classList.add("slot-transfer");
         element.addEventListener("pointerdown", (event) => beginSlotAction(event, ref));
         element.addEventListener("pointerenter", () => {
             hoveredSlot = ref;
+            detailItemId = resolveSlot(ref)?.id ?? AIR;
+            renderItemDetails();
+            if (shiftTransferState && shiftHeld && !shiftTransferState.keys.has(key)) {
+                shiftTransferState.keys.add(key);
+                transferSlot(ref);
+                return;
+            }
             if (dragState && !dragState.keys.has(key)) {
                 dragState.keys.add(key);
                 dragState.refs.push(ref);
                 dragState.slots.set(key, { ...resolveSlot(ref) });
+                element.classList.add("drag-target");
                 if (dragState.pickedOnDown) releasePickedStack(ref);
                 else updateDragDistribution();
             }
         });
         element.addEventListener("pointerleave", () => {
             if (hoveredSlot && refKey(hoveredSlot) === key) hoveredSlot = null;
+            detailItemId = inv[sel]?.id ?? AIR;
+            renderItemDetails();
         });
         element.addEventListener("contextmenu", (event) => event.preventDefault());
     } else element.tabIndex = -1;
@@ -433,6 +498,7 @@ function slotClick(ref, button) {
 }
 
 function moveIntoRefs(source, refs) {
+    let firstDestination = null;
     movePasses:
     for (const emptyPass of [false, true]) {
         for (const ref of refs) {
@@ -444,15 +510,18 @@ function moveIntoRefs(source, refs) {
                 const moved = Math.min(source.count, maxStack(source.id) - target.count);
                 target.count += moved;
                 source.count -= moved;
+                if (moved && !firstDestination) firstDestination = ref;
             } else if (emptyPass && target.id === AIR) {
                 const moved = Math.min(source.count, maxStack(source.id));
                 target.id = source.id;
                 target.count = moved;
                 source.count -= moved;
+                if (moved && !firstDestination) firstDestination = ref;
             }
         }
     }
     if (!source.count) clearStack(source);
+    return firstDestination;
 }
 
 function visibleRefs() {
@@ -501,7 +570,41 @@ function quickMove(ref) {
             ? playerRefs(HOTBAR_SIZE, INV_SIZE)
             : playerRefs(0, HOTBAR_SIZE);
     }
-    moveIntoRefs(source, destinations);
+    return moveIntoRefs(source, destinations);
+}
+
+function animateSlotTransfer(sourceRef, destinationRef, id) {
+    if (!destinationRef || id === AIR) return;
+    const source = overlayEl.querySelector(`.slot[data-container="${sourceRef.container}"][data-index="${sourceRef.index}"]`);
+    const destination = overlayEl.querySelector(`.slot[data-container="${destinationRef.container}"][data-index="${destinationRef.index}"]`);
+    if (!source || !destination) return;
+    const from = source.getBoundingClientRect();
+    const to = destination.getBoundingClientRect();
+    const ghost = createItemIcon(id, "transfer-ghost");
+    ghost.style.left = `${from.left + 5}px`;
+    ghost.style.top = `${from.top + 5}px`;
+    document.body.appendChild(ghost);
+    const animation = ghost.animate([
+        { transform: "translate3d(0, 0, 0) scale(1)", opacity: 1 },
+        { transform: `translate3d(${to.left - from.left}px, ${to.top - from.top}px, 0) scale(.72)`, opacity: .2 },
+    ], { duration: 170, easing: "cubic-bezier(.2,.8,.2,1)" });
+    animation.onfinish = () => ghost.remove();
+    animation.oncancel = () => ghost.remove();
+}
+
+function transferSlot(ref) {
+    const source = resolveSlot(ref);
+    if (!source || source.id === AIR) return;
+    const id = source.id;
+    const before = source.count;
+    const destination = quickMove(ref);
+    const moved = before - source.count;
+    if (!moved) return;
+    transferFeedbackKeys.add(refKey(ref));
+    if (destination) transferFeedbackKeys.add(refKey(destination));
+    animateSlotTransfer(ref, destination, id);
+    inventoryChanged();
+    transferFeedbackKeys.clear();
 }
 
 function distributeCursor(button, refs) {
@@ -557,9 +660,12 @@ function refreshSlot(ref) {
 function releasePickedStack(ref) {
     if (dragState.released || !targetAccepts(ref.container, ref.index, cursorStack.id)) return;
     const target = resolveSlot(ref);
+    const movingId = cursorStack.id;
     const before = `${cursorStack.id}:${cursorStack.count}:${target.id}:${target.count}`;
     slotClick(ref, 0);
     if (before === `${cursorStack.id}:${cursorStack.count}:${target.id}:${target.count}`) return;
+    animateSlotTransfer(dragState.source, ref, movingId);
+    overlayEl.querySelector(`.slot[data-container="${ref.container}"][data-index="${ref.index}"]`)?.classList.add("slot-transfer");
     dragState.released = true;
     refreshSlot(ref);
     drawHotbar();
@@ -571,8 +677,9 @@ function beginSlotAction(event, ref) {
     event.preventDefault();
     hoveredSlot = ref;
     if (event.shiftKey) {
-        quickMove(ref);
-        inventoryChanged();
+        shiftHeld = true;
+        shiftTransferState = { button: event.button, keys: new Set([refKey(ref)]) };
+        transferSlot(ref);
         return;
     }
     let pickedOnDown = false;
@@ -597,6 +704,7 @@ function beginSlotAction(event, ref) {
         distributed: false,
         released: false,
     };
+    event.currentTarget.classList.add("moving", "drag-target");
     overlayEl.classList.add("dragging-stack");
 }
 
@@ -624,8 +732,7 @@ function updateCursorStack() {
 }
 
 function positionGameCursor() {
-    gameCursorEl.style.left = `${mockCursor.x}px`;
-    gameCursorEl.style.top = `${mockCursor.y}px`;
+    gameCursorEl.style.transform = `translate3d(${mockCursor.x - 2}px, ${mockCursor.y - 2}px, 0)`;
     cursorStackEl.style.left = `${mockCursor.x + 12}px`;
     cursorStackEl.style.top = `${mockCursor.y + 12}px`;
 }
@@ -682,16 +789,36 @@ function returnCursorStack() {
 
 function renderInventory() {
     inventoryGridEl.innerHTML = "";
-    for (let i = 0; i < INV_SIZE; i++) {
-        inventoryGridEl.appendChild(makeSlot(inv[i], i === sel, { container: "player", index: i }));
+    const storage = document.createElement("div");
+    storage.className = "slot-grid inventory-grid inventory-storage";
+    for (let i = HOTBAR_SIZE; i < INV_SIZE; i++) {
+        storage.appendChild(makeSlot(inv[i], false, { container: "player", index: i }));
     }
+    const hotbar = document.createElement("div");
+    hotbar.className = "slot-grid inventory-grid inventory-hotbar";
+    for (let i = 0; i < HOTBAR_SIZE; i++) {
+        hotbar.appendChild(makeSlot(inv[i], i === sel, { container: "player", index: i }));
+    }
+    inventoryGridEl.append(storage, hotbar);
 }
 
-function recipeTooltip(recipe) {
-    return Object.entries(recipe.inputs).map(([id, required]) => {
-        const owned = countItem(id);
-        return `${ITEMS[id].name}: ${required} required, ${owned} owned, ${Math.max(0, required - owned)} missing`;
-    }).join("\n");
+function renderItemDetails() {
+    selectedItemDetailsEl.replaceChildren();
+    const item = ITEMS[detailItemId];
+    if (!item) {
+        selectedItemDetailsEl.hidden = true;
+        return;
+    }
+    selectedItemDetailsEl.hidden = false;
+    selectedItemDetailsEl.appendChild(createItemIcon(item.id, "item-detail-icon"));
+    const copy = document.createElement("span");
+    const name = document.createElement("strong");
+    name.textContent = item.name;
+    const meta = document.createElement("small");
+    const kind = item.tool ? "Tool" : item.placeBlock ? "Block" : "Item";
+    meta.textContent = `${kind} · ${countItem(item.id)} owned`;
+    copy.append(name, meta);
+    selectedItemDetailsEl.appendChild(copy);
 }
 
 function renderRecipes(station) {
@@ -702,52 +829,83 @@ function renderRecipes(station) {
     const search = recipeSearchEl.value.trim().toLowerCase();
     const recipes = RECIPES.filter((entry) => {
         if (!stations.has(entry.station)) return false;
+        const output = ITEMS[entry.output.id];
+        if (recipeCategory === "blocks" && !output.placeBlock) return false;
+        if (recipeCategory === "tools" && !output.tool) return false;
+        if (recipeCategory === "items" && (output.placeBlock || output.tool)) return false;
         if (!search) return true;
         const names = [ITEMS[entry.output.id].name, ...Object.keys(entry.inputs).map((id) => ITEMS[id].name)];
         return names.some((name) => name.toLowerCase().includes(search));
     });
-    for (const recipe of recipes) {
-        const available = canCraft(recipe);
-        const button = document.createElement("button");
-        button.className = "recipe";
-        button.disabled = !available;
-        button.title = recipeTooltip(recipe);
-        button.appendChild(createItemIcon(recipe.output.id, "recipe-output-icon"));
-        const copy = document.createElement("span");
-        copy.className = "recipe-copy";
-        const output = document.createElement("strong");
-        output.innerHTML = `${ITEMS[recipe.output.id].name} <small>×${recipe.output.count}</small>`;
-        copy.appendChild(output);
-        const requirements = document.createElement("span");
-        requirements.className = "recipe-requirements";
-        const uses = document.createElement("b");
-        uses.textContent = "Uses:";
-        requirements.appendChild(uses);
-        for (const [id, required] of Object.entries(recipe.inputs)) {
-            const owned = countItem(id);
-            const state = owned >= required ? "available" : "missing";
-            const requirement = document.createElement("span");
-            requirement.className = `requirement ${state}`;
-            requirement.appendChild(createItemIcon(Number(id), "requirement-icon"));
-            const name = document.createElement("span");
-            name.textContent = `${ITEMS[id].name} ×${required}`;
-            requirement.appendChild(name);
-            const amount = document.createElement("em");
-            amount.textContent = `${owned}/${required}`;
-            requirement.appendChild(amount);
-            requirements.appendChild(requirement);
+    const selectedRecipe = recipes.find((recipe) => recipe.id === selectedRecipeId);
+    selectedRecipeEl.replaceChildren();
+    selectedRecipeEl.hidden = false;
+    if (selectedRecipe) {
+        const available = canCraft(selectedRecipe);
+        const craftButton = document.createElement("button");
+        craftButton.type = "button";
+        craftButton.className = "selected-recipe-card";
+        craftButton.setAttribute("aria-disabled", String(!available));
+        craftButton.title = `Craft ${ITEMS[selectedRecipe.output.id].name}`;
+        const flow = document.createElement("span");
+        flow.className = "recipe-flow";
+        const inputs = document.createElement("span");
+        inputs.className = "recipe-flow-inputs";
+        for (const [id, required] of Object.entries(selectedRecipe.inputs)) {
+            const ingredient = document.createElement("span");
+            ingredient.className = "recipe-flow-item";
+            ingredient.appendChild(createItemIcon(Number(id), "recipe-flow-icon"));
+            const amount = document.createElement("b");
+            amount.textContent = `×${required}`;
+            ingredient.appendChild(amount);
+            inputs.appendChild(ingredient);
         }
-        copy.appendChild(requirements);
-        button.appendChild(copy);
-        button.addEventListener("click", (event) => {
-            let crafted = 0;
-            do {
-                if (!craft(recipe)) break;
-                crafted += recipe.output.count;
-            } while (event.shiftKey);
-            if (crafted) showToast(`Crafted ${crafted} ${ITEMS[recipe.output.id].name}`);
+        const arrow = document.createElement("span");
+        arrow.className = "recipe-flow-arrow";
+        arrow.textContent = "→";
+        const output = document.createElement("span");
+        output.className = "recipe-flow-item recipe-flow-output";
+        output.appendChild(createItemIcon(selectedRecipe.output.id, "recipe-flow-icon"));
+        const outputAmount = document.createElement("b");
+        outputAmount.textContent = `×${selectedRecipe.output.count}`;
+        output.appendChild(outputAmount);
+        flow.append(inputs, arrow, output);
+        craftButton.appendChild(flow);
+        craftButton.addEventListener("click", () => {
+            if (craft(selectedRecipe)) {
+                lastUsedRecipeId = selectedRecipe.id;
+                showToast(`Crafted ${ITEMS[selectedRecipe.output.id].name}`);
+            }
             else showToast("Missing materials or inventory space", true);
-            renderOverlay();
+        });
+        selectedRecipeEl.appendChild(craftButton);
+    } else {
+        const empty = document.createElement("div");
+        empty.className = "no-selected-recipe";
+        empty.textContent = "No selected recipe";
+        selectedRecipeEl.appendChild(empty);
+    }
+    for (const recipe of recipes) {
+        const button = document.createElement("button");
+        button.type = "button";
+        const available = canCraft(recipe);
+        button.className = `recipe${recipe.id === selectedRecipeId ? " selected" : ""}${available ? "" : " unavailable"}`;
+        button.setAttribute("aria-disabled", String(!available));
+        button.title = ITEMS[recipe.output.id].name;
+        button.appendChild(createItemIcon(recipe.output.id, "recipe-output-icon"));
+        button.addEventListener("click", () => {
+            if (!available) {
+                selectedRecipeId = null;
+                renderRecipes(station);
+                updateMockHover();
+                return;
+            }
+            selectedRecipeId = recipe.id;
+            lastUsedRecipeId = recipe.id;
+            detailItemId = recipe.output.id;
+            renderItemDetails();
+            renderRecipes(station);
+            updateMockHover();
         });
         recipeListEl.appendChild(button);
     }
@@ -764,11 +922,14 @@ function renderFurnace() {
     const progress = furnace.input.id === AIR ? 0 : Math.min(100, (furnace.progress / 8) * 100);
     const burn = furnace.burnTotal ? Math.min(100, (furnace.burnRemaining / furnace.burnTotal) * 100) : 0;
     stationPanelEl.innerHTML = `
-        <div class="furnace-layout">
-            <div class="station-slot" data-index="0"></div>
-            <div class="meters"><span>Smelt</span><i><b style="width:${progress}%"></b></i><span>Fuel</span><i><b style="width:${burn}%"></b></i></div>
-            <div class="station-slot" data-index="2"></div>
-            <div class="station-slot fuel-slot" data-index="1"></div>
+        <div class="furnace-panel-content">
+            <h3>Furnace</h3>
+            <div class="furnace-layout">
+                <div class="station-slot" data-index="0"></div>
+                <div class="meters"><span>Smelt</span><i><b style="width:${progress}%"></b></i><span>Fuel</span><i><b style="width:${burn}%"></b></i></div>
+                <div class="station-slot" data-index="2"></div>
+                <div class="station-slot fuel-slot" data-index="1"></div>
+            </div>
         </div>`;
     for (const host of stationPanelEl.querySelectorAll(".station-slot")) {
         const index = Number(host.dataset.index);
@@ -777,7 +938,7 @@ function renderFurnace() {
 }
 
 function renderChest() {
-    stationPanelEl.innerHTML = '<h3>Chest Storage</h3><div class="slot-grid chest-grid"></div>';
+    stationPanelEl.innerHTML = '<div class="storage-panel-content"><h3>Chest</h3><div class="slot-grid chest-grid"></div></div>';
     const grid = stationPanelEl.querySelector(".chest-grid");
     getChest(gameplayOverlay.key).forEach((slot, index) => {
         grid.appendChild(makeSlot(slot, false, { container: "chest", index }));
@@ -787,22 +948,33 @@ function renderChest() {
 function renderOverlay() {
     if (!gameplayOverlay) return;
     overlayEl.classList.toggle("inventory-menu", gameplayOverlay.type === "inventory");
+    overlayEl.classList.toggle("crafting-menu", gameplayOverlay.type === "crafting_table");
+    overlayEl.classList.toggle("storage-menu", gameplayOverlay.type === "chest");
+    overlayEl.classList.toggle("furnace-menu", gameplayOverlay.type === "furnace");
+    overlayEl.classList.toggle("settings-menu", settingsOpen);
+    gameplayWindowEl.hidden = settingsOpen;
+    gameSettingsWindowEl.hidden = !settingsOpen;
+    const hasRecipeCategories = gameplayOverlay.type === "crafting_table";
+    inventoryTabsEl.hidden = !hasRecipeCategories;
+    playerInventoryTitleEl.hidden = !["inventory", "chest", "furnace", "crafting_table"].includes(gameplayOverlay.type);
+    recipeTitleEl.hidden = !["inventory", "crafting_table"].includes(gameplayOverlay.type);
+    recipeTitleEl.textContent = gameplayOverlay.type === "crafting_table" ? "Crafting Table" : "Crafting";
     renderInventory();
+    renderItemDetails();
     stationPanelEl.innerHTML = "";
     recipeSectionEl.style.display = "none";
+    recipeSearchEl.style.display = "";
+    recipeListEl.style.display = "";
     if (gameplayOverlay.type === "inventory") {
-        inventoryControlsEl.style.display = "flex";
         recipeSectionEl.style.display = "block";
+        recipeSearchEl.style.display = "none";
         renderRecipes("inventory");
     } else if (gameplayOverlay.type === "crafting_table") {
-        inventoryControlsEl.style.display = "none";
         recipeSectionEl.style.display = "block";
         renderRecipes("crafting_table");
     } else if (gameplayOverlay.type === "furnace") {
-        inventoryControlsEl.style.display = "none";
         renderFurnace();
     } else if (gameplayOverlay.type === "chest") {
-        inventoryControlsEl.style.display = "none";
         renderChest();
     }
     updateCursorStack();
@@ -820,6 +992,20 @@ export function openStation(type, key) {
 
 function openGameplayUI(type, key = null) {
     gameplayOverlay = { type, key };
+    settingsOpen = false;
+    recipeCategory = "all";
+    const lastUsedRecipe = RECIPES.find((recipe) => recipe.id === lastUsedRecipeId);
+    const recipeAvailableHere = lastUsedRecipe && (
+        lastUsedRecipe.station === type ||
+        (type === "crafting_table" && lastUsedRecipe.station === "inventory")
+    );
+    selectedRecipeId = recipeAvailableHere && canCraft(lastUsedRecipe)
+        ? lastUsedRecipe.id
+        : null;
+    for (const tab of inventoryTabsEl.querySelectorAll(".inventory-tab")) {
+        tab.classList.toggle("active", tab.dataset.category === "all");
+    }
+    detailItemId = inv[sel]?.id ?? AIR;
     recipeSearchEl.value = "";
     dragState = null;
     hoveredSlot = null;
@@ -835,26 +1021,36 @@ function openGameplayUI(type, key = null) {
     window.dispatchEvent(new Event("game-ui-opened"));
 }
 
-export function closeGameplayUI(relock = true) {
+export function closeGameplayUI() {
     if (!gameplayOverlay) return;
     returnCursorStack();
     gameplayOverlay = null;
+    settingsOpen = false;
+    shiftTransferState = null;
     dragState = null;
     hoveredSlot = null;
+    mockCursor.hover?.dispatchEvent(new PointerEvent("pointerleave", { bubbles: false }));
+    mockCursor.hover = null;
+    mockCursor.downTarget = null;
+    mockCursor.range = null;
     overlayEl.style.display = "none";
     document.body.classList.remove("game-ui-open");
     gameCursorEl.hidden = true;
     crossEl.style.display = gameState === STATE_PLAY ? "block" : "none";
-    if (relock && gameState === STATE_PLAY && document.pointerLockElement !== canvas) {
-        suppressPause = true;
-        requestLock();
-    }
 }
 
-export function requestLock() {
-    canvas.requestPointerLock().catch(() => {
-        suppressPause = false;
-    });
+export async function requestLock() {
+    try {
+        await canvas.requestPointerLock({ unadjustedMovement: true });
+        rawPointerLock = true;
+    } catch {
+        try {
+            await canvas.requestPointerLock();
+            rawPointerLock = false;
+        } catch {
+            suppressPause = false;
+        }
+    }
 }
 
 export function initUI() {
@@ -862,6 +1058,7 @@ export function initUI() {
         drawHotbar();
         if (gameplayOverlay) renderOverlay();
     });
+    setSelectionCallback(updateHotbarSelection);
     drawHotbar();
     setUIState(STATE_MAIN);
 
@@ -877,7 +1074,35 @@ export function initUI() {
         mainOptionsEl.style.display = "none";
         mainMenuEl.style.display = "flex";
     });
-    document.getElementById("inventoryResumeBtn").addEventListener("click", () => closeGameplayUI(true));
+    document.getElementById("inventorySettingsBtn").addEventListener("click", () => {
+        settingsOpen = true;
+        renderOverlay();
+        positionGameCursor();
+        updateMockHover();
+    });
+    document.getElementById("inventorySettingsBackBtn").addEventListener("click", () => {
+        settingsOpen = false;
+        renderOverlay();
+        positionGameCursor();
+        updateMockHover();
+    });
+    const categoryIcons = {
+        all: CRAFTING_TABLE,
+        blocks: PLANKS,
+        tools: CROOK,
+        items: STRING,
+    };
+    for (const tab of inventoryTabsEl.querySelectorAll(".inventory-tab")) {
+        tab.appendChild(createItemIcon(categoryIcons[tab.dataset.category], "inventory-tab-icon"));
+        tab.addEventListener("click", () => {
+            recipeCategory = tab.dataset.category;
+            for (const other of inventoryTabsEl.querySelectorAll(".inventory-tab")) {
+                other.classList.toggle("active", other === tab);
+            }
+            renderRecipes(gameplayOverlay.type === "crafting_table" ? "crafting_table" : "inventory");
+            updateMockHover();
+        });
+    }
     document.getElementById("inventoryMenuBtn").addEventListener("click", () => {
         suppressPause = true;
         if (document.pointerLockElement) document.exitPointerLock();
@@ -890,21 +1115,23 @@ export function initUI() {
             setUIState(STATE_PLAY);
         } else {
             gameCursorEl.hidden = true;
+            rawPointerLock = false;
             suppressPause = false;
         }
     });
 
     document.addEventListener("keydown", (event) => {
+        if (event.code === "ShiftLeft" || event.code === "ShiftRight") shiftHeld = true;
         if (chatOpen) {
             if (event.code === "Enter") {
                 event.preventDefault();
                 event.stopImmediatePropagation();
                 submitChat();
-                closeChat(true);
+                closeChat();
             } else if (event.code === "Escape") {
                 event.preventDefault();
                 event.stopImmediatePropagation();
-                closeChat(true);
+                closeChat();
             }
             return;
         }
@@ -945,19 +1172,31 @@ export function initUI() {
         }
         if (event.code === "KeyE" && gameState === STATE_PLAY) {
             event.preventDefault();
-            if (gameplayOverlay) closeGameplayUI(true);
+            if (gameplayOverlay) closeGameplayUI();
             else openInventory();
         }
     }, true);
 
+    document.addEventListener("keyup", (event) => {
+        if (event.code !== "ShiftLeft" && event.code !== "ShiftRight") return;
+        shiftHeld = false;
+        shiftTransferState = null;
+    }, true);
+
     document.addEventListener("pointerup", (event) => {
+        if (shiftTransferState?.button === event.button) shiftTransferState = null;
         if (!dragState || event.button !== dragState.button) return;
         const finished = dragState;
         dragState = null;
         overlayEl.classList.remove("dragging-stack");
+        for (const slot of overlayEl.querySelectorAll(".drag-target")) {
+            slot.classList.remove("drag-target", "moving");
+        }
         if (finished.pickedOnDown) {
             if (!finished.released && hoveredSlot && refKey(hoveredSlot) !== refKey(finished.source)) {
+                const movingId = cursorStack.id;
                 slotClick(hoveredSlot, 0);
+                animateSlotTransfer(finished.source, hoveredSlot, movingId);
             }
             lastSlotClick = { key: refKey(finished.source), time: performance.now() };
         } else if (finished.distributed) {
@@ -987,8 +1226,11 @@ export function initUI() {
         if (!event.isTrusted || !gameplayOverlay || document.pointerLockElement !== canvas) return;
         event.preventDefault();
         event.stopImmediatePropagation();
-        mockCursor.x = Math.max(0, Math.min(innerWidth - 1, mockCursor.x + event.movementX));
-        mockCursor.y = Math.max(0, Math.min(innerHeight - 1, mockCursor.y + event.movementY));
+        shiftHeld = event.shiftKey;
+        const speed = Math.hypot(event.movementX, event.movementY);
+        const gain = rawPointerLock ? 1 + Math.min(1.5, speed / 18) : 1;
+        mockCursor.x = Math.max(0, Math.min(innerWidth - 1, mockCursor.x + event.movementX * gain));
+        mockCursor.y = Math.max(0, Math.min(innerHeight - 1, mockCursor.y + event.movementY * gain));
         positionGameCursor();
         if (mockCursor.range) setRangeFromCursor(mockCursor.range);
         updateMockHover();
@@ -1007,8 +1249,15 @@ export function initUI() {
         }
         target?.closest?.("input, textarea")?.focus();
         target?.dispatchEvent(new PointerEvent("pointerdown", {
-            bubbles: true, button: event.button, buttons: 1 << event.button,
-            clientX: mockCursor.x, clientY: mockCursor.y,
+            bubbles: true,
+            button: event.button,
+            buttons: 1 << event.button,
+            clientX: mockCursor.x,
+            clientY: mockCursor.y,
+            shiftKey: event.shiftKey,
+            ctrlKey: event.ctrlKey,
+            altKey: event.altKey,
+            metaKey: event.metaKey,
         }));
     }, true);
 
@@ -1018,8 +1267,15 @@ export function initUI() {
         event.stopImmediatePropagation();
         const target = targetAtGameCursor();
         target?.dispatchEvent(new PointerEvent("pointerup", {
-            bubbles: true, button: event.button, buttons: 0,
-            clientX: mockCursor.x, clientY: mockCursor.y,
+            bubbles: true,
+            button: event.button,
+            buttons: 0,
+            clientX: mockCursor.x,
+            clientY: mockCursor.y,
+            shiftKey: event.shiftKey,
+            ctrlKey: event.ctrlKey,
+            altKey: event.altKey,
+            metaKey: event.metaKey,
         }));
         if (event.button === 0 && target && target === mockCursor.downTarget) {
             target.closest?.("button")?.click();
@@ -1042,13 +1298,23 @@ export function initUI() {
         if (event.target !== overlayEl || event.target.closest(".game-window")) return;
         event.preventDefault();
         if (cursorStack.id === AIR) {
-            closeGameplayUI(true);
+            closeGameplayUI();
             return;
         }
         dropCursor(event.button === 2 ? 1 : cursorStack.count);
         inventoryChanged();
     });
     overlayEl.addEventListener("contextmenu", (event) => event.preventDefault());
+    document.addEventListener("pointerdown", (event) => {
+        event.target.closest?.("button, .btn")?.classList.add("pressed");
+    });
+    document.addEventListener("pointerup", () => {
+        for (const button of document.querySelectorAll(".pressed")) {
+            button.classList.remove("pressed");
+            button.classList.add("released");
+            button.addEventListener("animationend", () => button.classList.remove("released"), { once: true });
+        }
+    });
     recipeSearchEl.addEventListener("input", () => {
         if (gameplayOverlay?.type === "inventory") renderRecipes("inventory");
         else if (gameplayOverlay?.type === "crafting_table") renderRecipes("crafting_table");
@@ -1082,17 +1348,14 @@ export function initUI() {
     for (const slider of fovSliders) slider.addEventListener("input", (event) => updateFovVal(event.target.value));
     for (const input of fovInputs) input.addEventListener("input", (event) => updateFovVal(event.target.value));
 
-    canvas.addEventListener("wheel", (event) => {
+    window.addEventListener("wheel", (event) => {
         if (gameState !== STATE_PLAY || gameplayOverlay) return;
+        event.preventDefault();
         const direction = Math.sign(event.deltaY);
         if (!direction) return;
-        if (keys.KeyC) {
-            event.preventDefault();
-            adjustZoomLevel(direction);
-            return;
-        }
-        updateSel(sel + direction);
-    }, { passive: false });
+        if (keys.KeyC) adjustZoomLevel(direction);
+        else updateSel(sel + direction);
+    }, { capture: true, passive: false });
 }
 
 let stationRefresh = 0;

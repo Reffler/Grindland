@@ -23,7 +23,7 @@ export const PLACE_INTERVAL = 0.25;
 export const SAPLING_DROP_CHANCE = 0.5;
 export const SAPLING_GROWTH_TIME = 5 * 60;
 export const SAPLING_CROUCH_BOOST = 60;
-export const SAPLING_CROUCH_RADIUS = 5;
+export const SAPLING_CROUCH_RADIUS = 1.5;
 export const GRASS_SPREAD_CHANCE = 0.001;
 export const INFECTION_SPREAD_CHANCE = 0.02;
 export const GRASS_SPREAD_CHECKS = 20;
@@ -76,7 +76,7 @@ export const BLOCK_BOUNDS = {
 };
 
 export const HOTBAR_SIZE = 10;
-export const INV_SIZE = 36;
+export const INV_SIZE = 40;
 export const STACK_MAX = 64;
 
 export const STATE_MAIN = 0;

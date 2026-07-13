@@ -398,3 +398,14 @@ export function loadDrops(drops = []) {
     while (itemDrops.length) removeDrop(itemDrops.length - 1);
     for (const drop of drops) spawnItem(drop.id, drop.count, new THREE.Vector3().fromArray(drop.pos), { noOffset: true, velocityY: 0 });
 }
+
+export function disposeItemDrops() {
+    while (itemDrops.length) removeDrop(itemDrops.length - 1);
+    geometry.dispose();
+    flatGeometry.dispose();
+    for (const material of materials.values()) material.dispose();
+    for (const texture of textures.values()) texture.dispose();
+    materials.clear();
+    textures.clear();
+    mergeMovement.length = 0;
+}

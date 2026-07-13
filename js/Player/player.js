@@ -151,20 +151,13 @@ function sweepAxis(pos, vel, dt, axis) {
         maxZ = Math.floor(pos.z + RAD);
     let minY = Math.floor(pos.y),
         maxY = Math.ceil(pos.y + player.height) - 1;
-    const rng = (a, b, up) =>
-        up
-            ? (function* () {
-                for (let i = a; i <= b; i++) yield i;
-            })()
-            : (function* () {
-                for (let i = b; i >= a; i--) yield i;
-            })();
     if (axis === "x") {
-        const xs =
-            vel.x > 0 ? rng(minX, maxX, 1) : rng(minX, maxX, 0);
-        for (const y of rng(minY, maxY, 1))
-            for (const z of rng(minZ, maxZ, 1))
-                for (const x of xs)
+        const startX = vel.x > 0 ? minX : maxX;
+        const endX = vel.x > 0 ? maxX : minX;
+        const stepX = vel.x > 0 ? 1 : -1;
+        for (let y = minY; y <= maxY; y++)
+            for (let z = minZ; z <= maxZ; z++)
+                for (let x = startX; x !== endX + stepX; x += stepX)
                     if (world.isSolid(x, y, z)) {
                         pos.x =
                             vel.x > 0
@@ -174,11 +167,12 @@ function sweepAxis(pos, vel, dt, axis) {
                         return;
                     }
     } else {
-        const zs =
-            vel.z > 0 ? rng(minZ, maxZ, 1) : rng(minZ, maxZ, 0);
-        for (const y of rng(minY, maxY, 1))
-            for (const z of zs)
-                for (const x of rng(minX, maxX, 1))
+        const startZ = vel.z > 0 ? minZ : maxZ;
+        const endZ = vel.z > 0 ? maxZ : minZ;
+        const stepZ = vel.z > 0 ? 1 : -1;
+        for (let y = minY; y <= maxY; y++)
+            for (let z = startZ; z !== endZ + stepZ; z += stepZ)
+                for (let x = minX; x <= maxX; x++)
                     if (world.isSolid(x, y, z)) {
                         pos.z =
                             vel.z > 0

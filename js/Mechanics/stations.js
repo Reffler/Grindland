@@ -20,7 +20,7 @@ export function getFurnace(key) {
 }
 
 export function getChest(key) {
-    if (!chests.has(key)) chests.set(key, Array.from({ length: 27 }, emptySlot));
+    if (!chests.has(key)) chests.set(key, Array.from({ length: 30 }, emptySlot));
     return chests.get(key);
 }
 

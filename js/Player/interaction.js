@@ -98,14 +98,30 @@ crackOverlay.renderOrder = 999;
 scene.add(crackOverlay);
 
 /* ===== raycast (voxel DDA) ===== */
+const rayPoint = new THREE.Vector3();
+const boundsMin = new THREE.Vector3();
+const boundsMax = new THREE.Vector3();
+const rayFace = [0, 0, 0];
+const aabbFace = [0, 0, 0];
+const aabbHit = { dist: 0, face: aabbFace, point: rayPoint };
+const rayHit = { x: 0, y: 0, z: 0, face: rayFace, dist: 0, point: rayPoint, id: AIR, bounds: null };
+
 function intersectAABB(origin, dir, min, max) {
     let tMin = (min.x - origin.x) / dir.x;
     let tMax = (max.x - origin.x) / dir.x;
-    if (tMin > tMax) [tMin, tMax] = [tMax, tMin];
+    if (tMin > tMax) {
+        const swap = tMin;
+        tMin = tMax;
+        tMax = swap;
+    }
 
     let tyMin = (min.y - origin.y) / dir.y;
     let tyMax = (max.y - origin.y) / dir.y;
-    if (tyMin > tyMax) [tyMin, tyMax] = [tyMax, tyMin];
+    if (tyMin > tyMax) {
+        const swap = tyMin;
+        tyMin = tyMax;
+        tyMax = swap;
+    }
 
     if ((tMin > tyMax) || (tyMin > tMax)) return null;
     if (tyMin > tMin) tMin = tyMin;
@@ -113,7 +129,11 @@ function intersectAABB(origin, dir, min, max) {
 
     let tzMin = (min.z - origin.z) / dir.z;
     let tzMax = (max.z - origin.z) / dir.z;
-    if (tzMin > tzMax) [tzMin, tzMax] = [tzMax, tzMin];
+    if (tzMin > tzMax) {
+        const swap = tzMin;
+        tzMin = tzMax;
+        tzMax = swap;
+    }
 
     if ((tMin > tzMax) || (tzMin > tMax)) return null;
     if (tzMin > tMin) tMin = tzMin;
@@ -121,17 +141,20 @@ function intersectAABB(origin, dir, min, max) {
 
     if (tMin < 0) return null;
 
-    const hit = origin.clone().addScaledVector(dir, tMin);
+    rayPoint.copy(origin).addScaledVector(dir, tMin);
     const eps = 1e-5;
-    let face = [0, 0, 0];
-    if (Math.abs(hit.x - min.x) < eps) face = [-1, 0, 0];
-    else if (Math.abs(hit.x - max.x) < eps) face = [1, 0, 0];
-    else if (Math.abs(hit.y - min.y) < eps) face = [0, -1, 0];
-    else if (Math.abs(hit.y - max.y) < eps) face = [0, 1, 0];
-    else if (Math.abs(hit.z - min.z) < eps) face = [0, 0, -1];
-    else if (Math.abs(hit.z - max.z) < eps) face = [0, 0, 1];
+    aabbFace[0] = 0;
+    aabbFace[1] = 0;
+    aabbFace[2] = 0;
+    if (Math.abs(rayPoint.x - min.x) < eps) aabbFace[0] = -1;
+    else if (Math.abs(rayPoint.x - max.x) < eps) aabbFace[0] = 1;
+    else if (Math.abs(rayPoint.y - min.y) < eps) aabbFace[1] = -1;
+    else if (Math.abs(rayPoint.y - max.y) < eps) aabbFace[1] = 1;
+    else if (Math.abs(rayPoint.z - min.z) < eps) aabbFace[2] = -1;
+    else if (Math.abs(rayPoint.z - max.z) < eps) aabbFace[2] = 1;
 
-    return { dist: tMin, face, point: hit };
+    aabbHit.dist = tMin;
+    return aabbHit;
 }
 
 function ray(origin, dir, maxD) {
@@ -150,25 +173,41 @@ function ray(origin, dir, maxD) {
     const dx = Math.abs(ix),
         dy = Math.abs(iy),
         dz = Math.abs(iz);
-    let face = [0, 0, 0],
-        dist = 0;
+    rayFace[0] = 0;
+    rayFace[1] = 0;
+    rayFace[2] = 0;
+    let dist = 0;
     for (let i = 0; i < 512; i++) {
         const id = world.get(x, y, z);
         if (id !== AIR) {
             const bounds = BLOCK_BOUNDS[id];
             if (!bounds) {
-                const point = new THREE.Vector3(
+                rayPoint.set(
                     origin.x + dir.x * dist,
                     origin.y + dir.y * dist,
                     origin.z + dir.z * dist,
                 );
-                return { x, y, z, face, dist, point, id };
+                rayHit.x = x;
+                rayHit.y = y;
+                rayHit.z = z;
+                rayHit.dist = dist;
+                rayHit.id = id;
+                rayHit.bounds = null;
+                rayHit.face = rayFace;
+                return rayHit;
             } else {
-                const min = new THREE.Vector3(x + bounds.x, y + bounds.y, z + bounds.z);
-                const max = new THREE.Vector3(x + bounds.x + bounds.w, y + bounds.y + bounds.h, z + bounds.z + bounds.d);
-                const hit = intersectAABB(origin, dir, min, max);
+                boundsMin.set(x + bounds.x, y + bounds.y, z + bounds.z);
+                boundsMax.set(x + bounds.x + bounds.w, y + bounds.y + bounds.h, z + bounds.z + bounds.d);
+                const hit = intersectAABB(origin, dir, boundsMin, boundsMax);
                 if (hit && hit.dist <= maxD) {
-                    return { x, y, z, face: hit.face, dist: hit.dist, point: hit.point, bounds, id };
+                    rayHit.x = x;
+                    rayHit.y = y;
+                    rayHit.z = z;
+                    rayHit.dist = hit.dist;
+                    rayHit.id = id;
+                    rayHit.bounds = bounds;
+                    rayHit.face = aabbFace;
+                    return rayHit;
                 }
             }
         }
@@ -185,7 +224,9 @@ function ray(origin, dir, maxD) {
             x += sx;
             dist = tx;
             tx += dx;
-            face = [-sx, 0, 0];
+            rayFace[0] = -sx;
+            rayFace[1] = 0;
+            rayFace[2] = 0;
         } else if (
             ey &&
             (!ez || Math.abs(dir.y) >= Math.abs(dir.z))
@@ -193,12 +234,16 @@ function ray(origin, dir, maxD) {
             y += sy;
             dist = ty;
             ty += dy;
-            face = [0, -sy, 0];
+            rayFace[0] = 0;
+            rayFace[1] = -sy;
+            rayFace[2] = 0;
         } else {
             z += sz;
             dist = tz;
             tz += dz;
-            face = [0, 0, -sz];
+            rayFace[0] = 0;
+            rayFace[1] = 0;
+            rayFace[2] = -sz;
         }
         if (dist > maxD) break;
     }
@@ -219,6 +264,10 @@ function withinReach(hit) {
 // Interaction State
 let leftDown = false;
 let rightDown = false;
+let leftPressed = false;
+let leftReleased = false;
+let rightPressed = false;
+let rightReleased = false;
 let rightRepeatBlocked = false;
 let placeTimer = 0;
 let pebbleTimer = 0;
@@ -252,6 +301,11 @@ function tryPlace(hit) {
     const selected = getSelected();
     const id = ITEMS[selected.id]?.placeBlock;
     if (!id || !BLOCKS[id]?.placeable) return;
+    const ground = world.get(px, py - 1, pz);
+    if (id === SAPLING && ground !== DIRT && ground !== GRASS) return;
+    if (ground === GRASS) {
+        world.add(px, py - 1, pz, DIRT);
+    }
 
     // Determine axis for logs based on which face was clicked
     if (id === LOG) {
@@ -356,7 +410,6 @@ function updateCracks() {
     if (stage !== mining.stage) {
         mining.stage = stage;
         crackMat.map = DESTROY[stage];
-        crackMat.needsUpdate = true;
         spawnBlockParticles(mining.target, mining.target.face);
     }
     crackOverlay.position.set(
@@ -372,33 +425,22 @@ addEventListener("mousedown", (e) => {
     if (!isLocked() || isGameplayUIOpen()) return;
     if (e.button === 0) {
         leftDown = true;
-        punchTimer = 0.284;
-        playPunchAnimation();
+        leftPressed = true;
     }
     if (e.button === 2) {
         rightDown = true;
-        rightRepeatBlocked = false;
-        if (canInteractNow()) {
-            const farmingPebbles = canFarmPebbles(currentAim);
-            rightRepeatBlocked = isSneaking() && !!BLOCKS[currentAim.id]?.station;
-            tryUse(currentAim);
-            placeTimer = PLACE_INTERVAL;
-            pebbleTimer = farmingPebbles ? 0.12 : 0.75;
-        }
+        rightPressed = true;
     }
 });
 
 addEventListener("mouseup", (e) => {
     if (e.button === 0) {
         leftDown = false;
-        punchTimer = 0;
-        resetMining();
+        leftReleased = true;
     }
     if (e.button === 2) {
         rightDown = false;
-        rightRepeatBlocked = false;
-        placeTimer = 0;
-        pebbleTimer = 0;
+        rightReleased = true;
     }
 });
 
@@ -436,17 +478,25 @@ addEventListener("keyup", (event) => {
 document.addEventListener("pointerlockchange", () => {
     if (isLocked()) return;
     leftDown = false;
+    leftPressed = false;
+    leftReleased = false;
     punchTimer = 0;
     dropKeyDown = false;
     rightDown = false;
+    rightPressed = false;
+    rightReleased = false;
     rightRepeatBlocked = false;
     dropKeyTimer = 0;
 });
 
 window.addEventListener("game-ui-opened", () => {
     leftDown = false;
+    leftPressed = false;
+    leftReleased = false;
     punchTimer = 0;
     rightDown = false;
+    rightPressed = false;
+    rightReleased = false;
     rightRepeatBlocked = false;
     dropKeyDown = false;
     dropKeyTimer = 0;
@@ -477,6 +527,34 @@ export function updateInteraction(dt) {
             currentAim.y + b.y + b.h * 0.5,
             currentAim.z + b.z + b.d * 0.5
         );
+    }
+
+    if (leftPressed) {
+        leftPressed = false;
+        punchTimer = 0.284;
+        playPunchAnimation();
+    }
+    if (rightPressed) {
+        rightPressed = false;
+        rightRepeatBlocked = false;
+        if (canInteractNow()) {
+            const farmingPebbles = canFarmPebbles(currentAim);
+            rightRepeatBlocked = isSneaking() && !!BLOCKS[currentAim.id]?.station;
+            tryUse(currentAim);
+            placeTimer = PLACE_INTERVAL;
+            pebbleTimer = farmingPebbles ? 0.12 : 0.75;
+        }
+    }
+    if (leftReleased) {
+        leftReleased = false;
+        punchTimer = 0;
+        resetMining();
+    }
+    if (rightReleased) {
+        rightReleased = false;
+        rightRepeatBlocked = false;
+        placeTimer = 0;
+        pebbleTimer = 0;
     }
 
     // Right-click hold
