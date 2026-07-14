@@ -30,18 +30,25 @@ async function loadAsset(id) {
         const definition = library.entities[id];
         if (!definition) throw new Error(`Unknown sprite entity: ${id}`);
         const parts = await Promise.all((definition.parts ?? [definition]).map(async (part) => {
-            const [front, back, ...blinkImages] = await Promise.all([
+            const [front, back] = await Promise.all([
                 loadImage(part.front),
                 part.frontOnly ? null : loadImage(part.back ?? part.front),
-                ...(part.blinkAnimation?.frames ?? []).map(loadImage),
             ]);
             const voxel = Math.min(part.width / front.naturalWidth, part.height / front.naturalHeight);
             const halfDepth = voxel * part.voxels * 0.5;
             const depthOffset = { front: halfDepth, back: -halfDepth }[part.depthExtension] ?? 0;
             const build = (image) => buildVoxelAsset(image, part.width, halfDepth, back, part.height, depthOffset);
-            return { part, ...build(front), blinkFrames: blinkImages.map(build) };
+            return { part, ...build(front), build };
         }));
-        return { definition, parts };
+        const frameAnimations = await Promise.all((definition.animations ?? [])
+            .filter(({ type }) => type === "frames")
+            .map(async (config) => {
+                const target = parts.find(({ part }) => part.id === config.target);
+                if (!target) throw new Error(`Unknown animation target: ${config.target}`);
+                const frames = await Promise.all(config.frames.map(loadImage));
+                return { config, target, frames: frames.map(target.build) };
+            }));
+        return { definition, parts, frameAnimations };
     })();
     assets.set(id, pending);
     return pending;
@@ -53,10 +60,9 @@ export async function spawnSpriteEntity(id, block, rotationY) {
     const entity = new THREE.Group();
     entity.position.set(block.x + anchor.x, block.y + anchor.y, block.z + anchor.z);
     entity.rotation.y = rotationY;
-    const idleParts = {};
-    const blinks = [];
+    const nodes = new Map();
     for (const { geometry } of asset.parts) geometry.computeBoundingBox();
-    for (const assetPart of asset.parts) {
+    for (const [index, assetPart] of asset.parts.entries()) {
         const { part, geometry, material } = assetPart;
         const offset = part.offset ?? { x: 0, y: 0, z: 0 };
         const mesh = new THREE.Mesh(geometry, material);
@@ -67,78 +73,100 @@ export async function spawnSpriteEntity(id, block, rotationY) {
         mesh.castShadow = mesh.receiveShadow = true;
         let node = mesh;
         if (part.pivot) {
-            const pivotX = part.pivot.endsWith("Right") ? geometry.boundingBox.max.x : geometry.boundingBox.min.x;
-            const pivotY = part.pivot.startsWith("bottom") ? geometry.boundingBox.min.y : geometry.boundingBox.max.y;
+            const pivotX = THREE.MathUtils.lerp(geometry.boundingBox.min.x, geometry.boundingBox.max.x, part.pivot.x);
+            const pivotY = THREE.MathUtils.lerp(geometry.boundingBox.min.y, geometry.boundingBox.max.y, part.pivot.y);
+            const pivotZ = THREE.MathUtils.lerp(geometry.boundingBox.min.z, geometry.boundingBox.max.z, part.pivot.z ?? 0.5);
             node = new THREE.Group();
-            node.position.set(offset.x + pivotX, y + pivotY, offset.z);
-            mesh.position.set(-pivotX, -pivotY, 0);
+            node.position.set(offset.x + pivotX, y + pivotY, offset.z + pivotZ);
+            mesh.position.set(-pivotX, -pivotY, -pivotZ);
             node.add(mesh);
         } else {
             mesh.position.set(offset.x, y, offset.z);
         }
         entity.add(node);
-        if (part.idlePart) (idleParts[part.idlePart] ??= []).push({ node, y: node.position.y });
-        if (part.blinkAnimation) blinks.push({
+        nodes.set(part.id ?? `${id}:${index}`, {
+            node,
             mesh,
-            base: { geometry, material },
-            frames: assetPart.blinkFrames,
-            config: part.blinkAnimation,
-            frame: -1,
-            next: performance.now() * 0.001 + blinkDelay(part.blinkAnimation),
+            base: {
+                position: node.position.clone(),
+                rotation: node.rotation.clone(),
+                scale: node.scale.clone(),
+                geometry,
+                material,
+            },
         });
     }
     scene.add(entity);
-    if (asset.definition.idleAnimation || blinks.length) animatedEntities.add({ parts: idleParts, config: asset.definition.idleAnimation, blinks, phase: Math.random() });
+    const now = performance.now() * 0.001;
+    const animations = (asset.definition.animations ?? []).map((config) => {
+        if (config.type === "sine") {
+            for (const track of config.tracks) for (const target of track.targets ?? [track.target]) {
+                if (!nodes.has(target)) throw new Error(`Unknown animation target: ${target}`);
+            }
+            return { config, phase: (config.phase ?? 0) + (config.randomPhase ? Math.random() : 0) };
+        }
+        if (config.type !== "frames") throw new Error(`Unknown animation type: ${config.type}`);
+        const frames = asset.frameAnimations.find((animation) => animation.config === config);
+        return {
+            config,
+            target: nodes.get(config.target),
+            frames: frames.frames,
+            frame: -1,
+            next: config.interval ? now + animationDelay(config.interval) : now,
+        };
+    });
+    if (animations.length) animatedEntities.add({ nodes, animations });
     return entity;
 }
 
-function blinkDelay(config) {
-    return config.minInterval + Math.random() * (config.maxInterval - config.minInterval);
+function animationDelay({ min, max }) {
+    return min + Math.random() * (max - min);
+}
+
+function applySineAnimation(state, nodes, time) {
+    for (const track of state.config.tracks) {
+        const phase = time / state.config.period + state.phase + (track.phase ?? 0);
+        const progress = 0.5 - 0.5 * Math.cos(phase * Math.PI * 2);
+        let value = THREE.MathUtils.lerp(track.from, track.to, progress);
+        if (track.unit === "degrees") value = THREE.MathUtils.degToRad(value);
+        const property = track.transform === "translation" ? "position" : track.transform;
+        for (const id of track.targets ?? [track.target]) {
+            const vector = nodes.get(id)?.node[property];
+            if (!vector) continue;
+            if (track.mode === "multiply") vector[track.axis] *= value;
+            else if (track.mode === "set") vector[track.axis] = value;
+            else vector[track.axis] += value;
+        }
+    }
+}
+
+function applyFrameAnimation(state, time) {
+    if (time < state.next) return;
+    const index = Math.floor((time - state.next) / state.config.frameDuration);
+    if (state.config.interval && index >= state.frames.length) {
+        state.target.mesh.geometry = state.target.base.geometry;
+        state.target.mesh.material = state.target.base.material;
+        state.frame = -1;
+        state.next = time + animationDelay(state.config.interval);
+        return;
+    }
+    const frame = state.config.loop === false ? Math.min(index, state.frames.length - 1) : index % state.frames.length;
+    if (frame === state.frame) return;
+    state.frame = frame;
+    state.target.mesh.geometry = state.frames[frame].geometry;
+    state.target.mesh.material = state.frames[frame].material;
 }
 
 export function updateSpriteEntities(time) {
-    for (const { parts, config, blinks, phase } of animatedEntities) {
-        for (const blink of blinks) {
-            if (time < blink.next) continue;
-            const frame = Math.floor((time - blink.next) / blink.config.frameDuration);
-            if (frame < blink.frames.length) {
-                if (frame === blink.frame) continue;
-                blink.frame = frame;
-                blink.mesh.geometry = blink.frames[frame].geometry;
-                blink.mesh.material = blink.frames[frame].material;
-            } else {
-                blink.mesh.geometry = blink.base.geometry;
-                blink.mesh.material = blink.base.material;
-                blink.frame = -1;
-                blink.next = time + blinkDelay(blink.config);
-            }
+    for (const { nodes, animations } of animatedEntities) {
+        for (const { node, base } of nodes.values()) {
+            node.position.copy(base.position);
+            node.rotation.copy(base.rotation);
+            node.scale.copy(base.scale);
         }
-        if (!config) continue;
-        const inhale = 0.5 - 0.5 * Math.cos((time / config.period + phase) * Math.PI * 2);
-        const sway = Math.sin((time / config.period + phase) * Math.PI * 2);
-        const bodyLift = inhale * config.bodyBob;
-        const headLift = inhale * config.headBob;
-        for (const { node, y } of parts.chest ?? []) {
-            node.position.y = y + bodyLift;
-            node.scale.set(1 + inhale * config.chestScale, 1 + inhale * config.chestScale * 0.35, 1 + inhale * config.chestScale);
-        }
-        for (const { node, y } of parts.belly ?? []) node.position.y = y + bodyLift;
-        for (const { node, y } of parts.head ?? []) node.position.y = y + headLift;
-        for (const { node, y } of parts.leftArm ?? []) {
-            node.position.y = y + bodyLift;
-            node.rotation.z = -inhale * config.armAngle;
-        }
-        for (const { node, y } of parts.rightArm ?? []) {
-            node.position.y = y + bodyLift;
-            node.rotation.z = inhale * config.armAngle;
-        }
-        for (const { node, y } of parts.leftEar ?? []) {
-            node.position.y = y + headLift;
-            node.rotation.z = -sway * config.earAngle;
-        }
-        for (const { node, y } of parts.rightEar ?? []) {
-            node.position.y = y + headLift;
-            node.rotation.z = sway * config.earAngle;
+        for (const animation of animations) {
+            if (animation.config.type === "sine") applySineAnimation(animation, nodes, time);
+            else if (animation.config.type === "frames") applyFrameAnimation(animation, time);
         }
     }
 }
