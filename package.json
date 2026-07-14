@@ -4,7 +4,7 @@
   "type": "module",
   "scripts": {
     "dev": "vite",
-    "build": "vite build && rm -rf dist/textures && cp -R textures dist/textures",
+    "build": "vite build && rm -rf dist/textures dist/models && cp -R textures dist/textures && cp -R models dist/models",
     "preview": "vite preview"
   },
   "devDependencies": {
