@@ -1,0 +1,214 @@
+<!doctype html>
+<html lang="en">
+<head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>Model Editor</title>
+    <link rel="stylesheet" href="styles.css">
+    <script defer src="https://unpkg.com/lucide@0.468.0/dist/umd/lucide.min.js"></script>
+    <script defer src="editor.js"></script>
+    <script defer src="https://cdn.jsdelivr.net/npm/alpinejs@3.x.x/dist/cdn.min.js"></script>
+</head>
+<body>
+    <main x-data="pixelEditor" x-init="init()" @paste.window="handlePaste($event)" @keydown.window="handleKeydown($event)" x-cloak>
+        <header class="topbar">
+            <div class="brand">
+                <span>Model Editor</span>
+                <small>64 x 64</small>
+            </div>
+
+            <nav class="tools" aria-label="Drawing tools">
+                <div class="tool-group">
+                    <button type="button" :class="{ active: tool === 'pencil' }" @click="tool = 'pencil'" title="Pencil" aria-label="Pencil">
+                        <i data-lucide="pencil"></i>
+                    </button>
+                    <button type="button" :class="{ active: tool === 'eraser' }" @click="tool = 'eraser'" title="Eraser" aria-label="Eraser">
+                        <i data-lucide="eraser"></i>
+                    </button>
+                    <button type="button" :class="{ active: tool === 'eyedropper' }" @click="tool = 'eyedropper'" title="Eyedropper" aria-label="Eyedropper">
+                        <i data-lucide="pipette"></i>
+                    </button>
+                    <button type="button" :class="{ active: tool === 'bucket' }" @click="tool = 'bucket'" title="Paint Bucket" aria-label="Paint Bucket">
+                        <i data-lucide="paint-bucket"></i>
+                    </button>
+                    <button type="button" :class="{ active: tool === 'selection' }" @click="tool = 'selection'" title="Rectangular selection" aria-label="Rectangular selection">
+                        <i data-lucide="scan"></i>
+                    </button>
+                    <button type="button" :class="{ active: tool === 'wand' }" @click="tool = 'wand'" title="Magic Wand" aria-label="Magic Wand">
+                        <i data-lucide="wand-sparkles"></i>
+                    </button>
+                    <button type="button" :class="{ active: tool === 'move' }" @click="tool = 'move'" title="Move selection" aria-label="Move selection">
+                        <i data-lucide="move"></i>
+                    </button>
+                </div>
+
+                <label class="brush-size" x-show="tool === 'pencil' || tool === 'eraser'">
+                    <span>Size</span>
+                    <input type="range" min="1" max="16" x-model.number="brushSize" aria-label="Brush size">
+                    <input type="number" min="1" max="16" x-model.number="brushSize" aria-label="Brush size value">
+                </label>
+
+                <label class="wand-tolerance" x-show="tool === 'wand' || tool === 'bucket'">
+                    <span>Tolerance</span>
+                    <input type="range" min="0" max="255" x-model.number="wandTolerance" aria-label="Magic Wand tolerance">
+                    <input type="number" min="0" max="255" x-model.number="wandTolerance" aria-label="Magic Wand tolerance value">
+                </label>
+
+                <label class="color-control" title="Color">
+                    <input type="color" x-model="color" aria-label="Drawing color">
+                </label>
+
+                <div class="palette-control">
+                    <div class="swatches" aria-label="Color swatches">
+                        <template x-for="swatch in palette" :key="swatch">
+                            <button type="button" class="swatch" :class="{ selected: color === swatch }" :style="`--swatch: ${swatch}`" @click="highlightPaletteColor(swatch); color = swatch; tool = 'pencil'" :title="swatch" :aria-label="`Use ${swatch}`"></button>
+                        </template>
+                    </div>
+                    <div class="quantization">
+                        <span>Colors</span>
+                        <input
+                            type="range"
+                            min="1"
+                            :max="quantizationMax"
+                            :value="quantization"
+                            @pointerdown="beginQuantization()"
+                            @input="quantizeActiveLayer($event.target.value)"
+                            aria-label="Color quantization"
+                        >
+                        <output x-text="quantization"></output>
+                        <button
+                            type="button"
+                            class="quantization-confirm"
+                            :disabled="!quantizationPending"
+                            @click="confirmQuantization()"
+                            title="Apply quantization"
+                            aria-label="Apply quantization"
+                        >
+                            <i data-lucide="check"></i>
+                        </button>
+                    </div>
+                </div>
+
+                <div class="tool-group">
+                    <button type="button" @click="undo()" :disabled="history.length === 0" title="Undo" aria-label="Undo">
+                        <i data-lucide="undo-2"></i>
+                    </button>
+                    <button type="button" @click="redo()" :disabled="future.length === 0" title="Redo" aria-label="Redo">
+                        <i data-lucide="redo-2"></i>
+                    </button>
+                    <button type="button" :class="{ active: gridVisible }" @click="gridVisible = !gridVisible" title="Toggle grid" aria-label="Toggle grid">
+                        <i data-lucide="grid-3x3"></i>
+                    </button>
+                    <button type="button" @click="download()" title="Export PNG" aria-label="Export PNG">
+                        <i data-lucide="download"></i>
+                    </button>
+                    <button type="button" @click="$refs.fileInput.click()" title="Open image" aria-label="Open image">
+                        <i data-lucide="image-plus"></i>
+                    </button>
+                    <input x-ref="fileInput" class="file-input" type="file" accept="image/*" multiple @change="importFiles($event.target.files); $event.target.value = ''">
+                </div>
+            </nav>
+        </header>
+
+        <div class="editor-body">
+            <section
+                class="workspace"
+                :class="{ 'drop-active': dropActive }"
+                @dragenter.prevent="dropActive = true"
+                @dragover.prevent="dropActive = true"
+                @dragleave.self="dropActive = false"
+                @drop.prevent="handleDrop($event)"
+            >
+                <div class="canvas-frame">
+                    <canvas
+                        x-ref="canvas"
+                        width="64"
+                        height="64"
+                        :class="`tool-${tool}`"
+                        @pointerdown="startPointer($event)"
+                        @pointermove="continuePointer($event)"
+                        @pointerup.window="endPointer($event)"
+                        @pointercancel.window="endPointer($event)"
+                        @pointerleave="clearHover()"
+                        @auxclick.prevent
+                        @contextmenu.prevent
+                        aria-label="64 by 64 pixel drawing canvas"
+                    ></canvas>
+                    <canvas x-ref="voxelCanvas" class="voxel-canvas" aria-hidden="true"></canvas>
+                    <canvas x-ref="paletteHighlight" class="palette-highlight" width="64" height="64" x-show="!voxelReady" aria-hidden="true"></canvas>
+                    <div class="pixel-grid" x-show="gridVisible && !voxelReady" aria-hidden="true"></div>
+                    <svg class="selection-outline" x-show="selection && !voxelReady" viewBox="0 0 64 64" preserveAspectRatio="none" aria-hidden="true">
+                        <path :d="selectionPath"></path>
+                        <path class="marching" :d="selectionPath"></path>
+                    </svg>
+                    <div
+                        class="selection-hitbox"
+                        x-show="tool === 'move' && selection && !voxelReady"
+                        :style="selectionStyle()"
+                        @pointerdown.stop="startMove($event)"
+                        @pointermove="continuePointer($event)"
+                        @pointerleave="clearHover()"
+                        aria-hidden="true"
+                    ></div>
+                    <div class="pixel-cursor" x-show="hoverPoint && !voxelReady" :style="hoverStyle()" aria-hidden="true"></div>
+                </div>
+                <div class="drop-indicator" x-show="dropActive" aria-hidden="true">
+                    <i data-lucide="image-down"></i>
+                </div>
+            </section>
+
+            <aside class="layers-panel">
+                <header class="layers-header">
+                    <h2>Layers</h2>
+                    <div class="layer-actions">
+                        <button type="button" @click="addLayer()" title="New layer" aria-label="New layer">
+                            <i data-lucide="plus"></i>
+                        </button>
+                        <button type="button" @click="duplicateLayer()" title="Duplicate layer" aria-label="Duplicate layer">
+                            <i data-lucide="copy"></i>
+                        </button>
+                        <button type="button" @click="removeLayer()" :disabled="layers.length === 1" title="Delete layer" aria-label="Delete layer">
+                            <i data-lucide="trash-2"></i>
+                        </button>
+                    </div>
+                </header>
+
+                <div class="layers-list">
+                    <template x-for="layer in layers" :key="layer.id">
+                        <div
+                            class="layer-row"
+                            :class="{ active: activeLayerId === layer.id, dragging: draggedLayerId === layer.id }"
+                            :draggable="editingLayerId !== layer.id"
+                            @click="activateLayer(layer.id)"
+                            @dblclick="selectLayerPixels(layer.id)"
+                            @dragstart="beginLayerDrag(layer.id, $event)"
+                            @dragover.prevent="reorderLayer(layer.id, $event)"
+                            @drop.stop.prevent="finishLayerDrag()"
+                            @dragend="finishLayerDrag()"
+                        >
+                            <i class="drag-handle" data-lucide="grip-vertical" aria-hidden="true"></i>
+                            <button type="button" class="visibility" :class="{ muted: !layer.visible }" @click.stop="toggleLayer(layer)" title="Toggle visibility" aria-label="Toggle layer visibility">
+                                <i data-lucide="eye"></i>
+                            </button>
+                            <span class="layer-thumbnail">
+                                <canvas width="64" height="64" :data-layer-thumbnail="layer.id"></canvas>
+                            </span>
+                            <input
+                                class="layer-name"
+                                x-model="layer.name"
+                                draggable="false"
+                                @pointerdown.stop="activeLayerId = layer.id; editingLayerId = layer.id"
+                                @focus="editingLayerId = layer.id"
+                                @blur="editingLayerId = null"
+                                @dblclick.stop
+                                @dragstart.stop.prevent
+                                aria-label="Layer name"
+                            >
+                        </div>
+                    </template>
+                </div>
+            </aside>
+        </div>
+    </main>
+</body>
+</html>
