@@ -110,7 +110,19 @@
           "height": 1.25,
           "voxels": 24,
           "idlePart": "head",
-          "offset": { "x": 0, "y": -0.05, "z": 0 }
+          "offset": { "x": 0, "y": -0.05, "z": 0 },
+          "blinkAnimation": {
+            "frames": [
+              "./models/animations/shopper/blink/blink_1.png",
+              "./models/animations/shopper/blink/blink_2.png",
+              "./models/animations/shopper/blink/blink_3.png",
+              "./models/animations/shopper/blink/blink_4.png",
+              "./models/animations/shopper/blink/blink_5.png"
+            ],
+            "frameDuration": 0.07,
+            "minInterval": 2.5,
+            "maxInterval": 6
+          }
         },
         {
           "front": "./models/shopper_nose_front.png",

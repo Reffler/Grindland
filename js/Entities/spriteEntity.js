@@ -30,14 +30,16 @@ async function loadAsset(id) {
         const definition = library.entities[id];
         if (!definition) throw new Error(`Unknown sprite entity: ${id}`);
         const parts = await Promise.all((definition.parts ?? [definition]).map(async (part) => {
-            const [front, back] = await Promise.all([
+            const [front, back, ...blinkImages] = await Promise.all([
                 loadImage(part.front),
                 part.frontOnly ? null : loadImage(part.back ?? part.front),
+                ...(part.blinkAnimation?.frames ?? []).map(loadImage),
             ]);
             const voxel = Math.min(part.width / front.naturalWidth, part.height / front.naturalHeight);
             const halfDepth = voxel * part.voxels * 0.5;
             const depthOffset = { front: halfDepth, back: -halfDepth }[part.depthExtension] ?? 0;
-            return { part, ...buildVoxelAsset(front, part.width, halfDepth, back, part.height, depthOffset) };
+            const build = (image) => buildVoxelAsset(image, part.width, halfDepth, back, part.height, depthOffset);
+            return { part, ...build(front), blinkFrames: blinkImages.map(build) };
         }));
         return { definition, parts };
     })();
@@ -52,6 +54,7 @@ export async function spawnSpriteEntity(id, block, rotationY) {
     entity.position.set(block.x + anchor.x, block.y + anchor.y, block.z + anchor.z);
     entity.rotation.y = rotationY;
     const idleParts = {};
+    const blinks = [];
     for (const { geometry } of asset.parts) geometry.computeBoundingBox();
     for (const assetPart of asset.parts) {
         const { part, geometry, material } = assetPart;
@@ -75,14 +78,42 @@ export async function spawnSpriteEntity(id, block, rotationY) {
         }
         entity.add(node);
         if (part.idlePart) (idleParts[part.idlePart] ??= []).push({ node, y: node.position.y });
+        if (part.blinkAnimation) blinks.push({
+            mesh,
+            base: { geometry, material },
+            frames: assetPart.blinkFrames,
+            config: part.blinkAnimation,
+            frame: -1,
+            next: performance.now() * 0.001 + blinkDelay(part.blinkAnimation),
+        });
     }
     scene.add(entity);
-    if (asset.definition.idleAnimation) animatedEntities.add({ parts: idleParts, config: asset.definition.idleAnimation, phase: Math.random() });
+    if (asset.definition.idleAnimation || blinks.length) animatedEntities.add({ parts: idleParts, config: asset.definition.idleAnimation, blinks, phase: Math.random() });
     return entity;
 }
 
+function blinkDelay(config) {
+    return config.minInterval + Math.random() * (config.maxInterval - config.minInterval);
+}
+
 export function updateSpriteEntities(time) {
-    for (const { parts, config, phase } of animatedEntities) {
+    for (const { parts, config, blinks, phase } of animatedEntities) {
+        for (const blink of blinks) {
+            if (time < blink.next) continue;
+            const frame = Math.floor((time - blink.next) / blink.config.frameDuration);
+            if (frame < blink.frames.length) {
+                if (frame === blink.frame) continue;
+                blink.frame = frame;
+                blink.mesh.geometry = blink.frames[frame].geometry;
+                blink.mesh.material = blink.frames[frame].material;
+            } else {
+                blink.mesh.geometry = blink.base.geometry;
+                blink.mesh.material = blink.base.material;
+                blink.frame = -1;
+                blink.next = time + blinkDelay(blink.config);
+            }
+        }
+        if (!config) continue;
         const inhale = 0.5 - 0.5 * Math.cos((time / config.period + phase) * Math.PI * 2);
         const sway = Math.sin((time / config.period + phase) * Math.PI * 2);
         const bodyLift = inhale * config.bodyBob;
