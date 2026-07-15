@@ -28,7 +28,7 @@ body {
 main {
     min-height: 100vh;
     display: grid;
-    grid-template-rows: auto 1fr;
+    grid-template-columns: 64px minmax(0, 1fr);
 }
 
 .file-input {
@@ -36,27 +36,12 @@ main {
 }
 
 .topbar {
-    min-height: 64px;
+    min-height: 0;
     display: flex;
-    align-items: center;
-    gap: 24px;
-    padding: 10px 16px;
-    border-bottom: 1px solid #34383c;
+    justify-content: center;
+    padding: 8px 7px;
+    border-right: 1px solid #34383c;
     background: #1b1e21;
-}
-
-.brand {
-    min-width: max-content;
-    display: flex;
-    align-items: baseline;
-    gap: 9px;
-    font-weight: 700;
-}
-
-.brand small {
-    color: #9ca3a8;
-    font-size: 12px;
-    font-weight: 600;
 }
 
 .tools,
@@ -67,20 +52,26 @@ main {
 }
 
 .tools {
-    min-width: 0;
+    width: 100%;
+    min-height: 0;
     flex: 1;
-    gap: 12px;
+    flex-direction: column;
+    gap: 8px;
+    overflow-x: hidden;
+    overflow-y: auto;
 }
 
 .tool-group {
+    width: 100%;
+    flex-direction: column;
     gap: 4px;
-    padding-left: 12px;
-    border-left: 1px solid #3b4044;
+    padding-top: 8px;
+    border-top: 1px solid #3b4044;
 }
 
 .tool-group:first-child {
-    padding-left: 0;
-    border-left: 0;
+    padding-top: 0;
+    border-top: 0;
 }
 
 button {
@@ -136,11 +127,12 @@ button svg {
 
 .wand-tolerance,
 .brush-size {
-    height: 38px;
+    width: 48px;
     display: flex;
+    flex-direction: column;
     align-items: center;
-    gap: 7px;
-    padding: 0 8px;
+    gap: 2px;
+    padding: 4px 2px;
     border: 1px solid #4b5155;
     border-radius: 5px;
     background: #24282b;
@@ -149,19 +141,13 @@ button svg {
 .wand-tolerance span,
 .brush-size span {
     color: #b8bdc0;
-    font-size: 12px;
+    font-size: 8px;
     font-weight: 600;
-}
-
-.wand-tolerance input[type="range"],
-.brush-size input[type="range"] {
-    width: 92px;
-    accent-color: #55d6be;
 }
 
 .wand-tolerance input[type="number"],
 .brush-size input[type="number"] {
-    width: 46px;
+    width: 42px;
     padding: 4px;
     border: 1px solid #4b5155;
     border-radius: 3px;
@@ -250,14 +236,14 @@ button svg {
 .editor-body {
     min-height: 0;
     display: grid;
-    grid-template-columns: 220px minmax(0, 1fr) 264px;
+    grid-template-columns: minmax(0, 1fr) 264px;
 }
 
 .palette-panel {
     min-height: 0;
     display: grid;
     grid-template-rows: auto 1fr;
-    border-right: 1px solid #34383c;
+    border-top: 1px solid #34383c;
     background: #1b1e21;
 }
 
@@ -312,7 +298,7 @@ button svg {
     display: grid;
     place-items: center;
     padding: 24px;
-    background: #15181a;
+    background: #ffffff;
 }
 
 .workspace.drop-active {
@@ -325,7 +311,7 @@ button svg {
     display: grid;
     grid-template-columns: minmax(0, 1fr) 224px;
     align-items: end;
-    gap: 20px;
+    gap: 8px 20px;
 }
 
 .canvas-frame {
@@ -333,26 +319,55 @@ button svg {
     width: 100%;
     aspect-ratio: 1;
     overflow: visible;
-    border: 1px solid #666d71;
-    background-color: #e6e8e8;
-    background-image:
-        linear-gradient(45deg, #c7cbcc 25%, transparent 25%),
-        linear-gradient(-45deg, #c7cbcc 25%, transparent 25%),
-        linear-gradient(45deg, transparent 75%, #c7cbcc 75%),
-        linear-gradient(-45deg, transparent 75%, #c7cbcc 75%);
-    background-position: 0 0, 0 8px, 8px -8px, -8px 0;
-    background-size: 16px 16px;
-    box-shadow: 0 10px 28px rgb(0 0 0 / 35%);
 }
 
 .future-window {
     position: relative;
+    grid-column: 2;
+    grid-row: 1;
     width: 224px;
     aspect-ratio: 1;
     overflow: hidden;
     border: 1px solid #c9c9c9;
     background: #ffffff;
     box-shadow: 0 6px 18px rgb(0 0 0 / 28%);
+}
+
+.canvas-zoom {
+    grid-column: 1;
+    grid-row: 2;
+    padding: 0 4px;
+    color: #4b5155;
+    font-size: 10px;
+}
+
+.canvas-zoom label {
+    display: grid;
+    grid-template-columns: 36px minmax(0, 1fr) 34px;
+    align-items: center;
+    gap: 6px;
+}
+
+.canvas-zoom input {
+    width: 100%;
+    accent-color: #55d6be;
+}
+
+.canvas-zoom output {
+    text-align: right;
+    font-variant-numeric: tabular-nums;
+}
+
+.zoom-steps {
+    display: flex;
+    justify-content: space-between;
+    margin: 0 40px 0 42px;
+    color: #8a9094;
+    font-size: 8px;
+}
+
+.rotation-hidden {
+    visibility: hidden;
 }
 
 .model-preview {
@@ -375,7 +390,7 @@ button svg {
     bottom: 4px;
     left: 4px;
     display: grid;
-    grid-template-columns: repeat(4, 1fr);
+    grid-template-columns: repeat(5, 1fr);
     gap: 2px;
     pointer-events: none;
 }
@@ -424,6 +439,15 @@ button svg {
 .canvas-frame > .voxel-canvas {
     z-index: 1;
     image-rendering: pixelated;
+    pointer-events: none;
+}
+
+.workspace > .voxel-bounds-canvas {
+    position: absolute;
+    z-index: 15;
+    inset: 0;
+    width: 100%;
+    height: 100%;
     pointer-events: none;
 }
 
@@ -479,9 +503,15 @@ button svg {
 .layers-panel {
     min-height: 0;
     display: grid;
-    grid-template-rows: auto 1fr;
+    grid-template-rows: repeat(2, minmax(0, 1fr));
     border-left: 1px solid #34383c;
     background: #1b1e21;
+}
+
+.layers-section {
+    min-height: 0;
+    display: grid;
+    grid-template-rows: auto 1fr;
 }
 
 .layers-header {
@@ -694,30 +724,13 @@ button svg {
         overflow: auto;
     }
 
-    .topbar {
-        align-items: flex-start;
-        flex-direction: column;
-        gap: 10px;
-    }
-
-    .tools {
-        width: 100%;
-        overflow-x: auto;
-        padding-bottom: 4px;
-    }
-
     .workspace {
         padding: 16px;
     }
 
     .editor-body {
         grid-template-columns: 1fr;
-        grid-template-rows: auto minmax(420px, auto) 220px;
-    }
-
-    .palette-panel {
-        border-right: 0;
-        border-bottom: 1px solid #34383c;
+        grid-template-rows: minmax(420px, auto) 440px;
     }
 
     .palette-content {
@@ -745,6 +758,12 @@ button svg {
         width: min(92vw, 640px);
         grid-template-columns: minmax(0, 1fr);
         gap: 12px;
+    }
+
+    .canvas-zoom,
+    .future-window {
+        grid-column: 1;
+        grid-row: auto;
     }
 
     .future-window {

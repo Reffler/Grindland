@@ -7,19 +7,14 @@
     <meta http-equiv="Pragma" content="no-cache">
     <meta http-equiv="Expires" content="0">
     <title>Model Editor</title>
-    <link rel="stylesheet" href="styles.css?v=20260714-7">
+    <link rel="stylesheet" href="styles.css?v=20260715-8">
     <script defer src="https://unpkg.com/lucide@0.468.0/dist/umd/lucide.min.js"></script>
-    <script defer src="editor.js?v=20260714-9"></script>
+    <script defer src="editor.js?v=20260715-13"></script>
     <script defer src="https://cdn.jsdelivr.net/npm/alpinejs@3.x.x/dist/cdn.min.js"></script>
 </head>
 <body>
     <main x-data="pixelEditor" x-init="init()" @paste.window="handlePaste($event)" @keydown.window="handleKeydown($event)" x-cloak>
         <header class="topbar">
-            <div class="brand">
-                <span>Model Editor</span>
-                <small>64 x 64</small>
-            </div>
-
             <nav class="tools" aria-label="Drawing tools">
                 <div class="tool-group">
                     <button type="button" :class="{ active: tool === 'pencil' }" @click="tool = 'pencil'" title="Pencil" aria-label="Pencil">
@@ -47,13 +42,11 @@
 
                 <label class="brush-size" x-show="tool === 'pencil' || tool === 'eraser'">
                     <span>Size</span>
-                    <input type="range" min="1" max="16" x-model.number="brushSize" aria-label="Brush size">
                     <input type="number" min="1" max="16" x-model.number="brushSize" aria-label="Brush size value">
                 </label>
 
                 <label class="wand-tolerance" x-show="tool === 'wand' || tool === 'bucket'">
                     <span>Tolerance</span>
-                    <input type="range" min="0" max="255" x-model.number="wandTolerance" aria-label="Magic Wand tolerance">
                     <input type="number" min="0" max="255" x-model.number="wandTolerance" aria-label="Magic Wand tolerance value">
                 </label>
 
@@ -85,54 +78,6 @@
         </header>
 
         <div class="editor-body">
-            <aside class="palette-panel">
-                <header class="palette-header">
-                    <h2>Colors</h2>
-                    <button type="button" @click="$refs.paletteInput.click()" title="Import GPL palette" aria-label="Import GPL palette">
-                        <i data-lucide="upload"></i>
-                    </button>
-                    <input x-ref="paletteInput" class="file-input" type="file" accept=".gpl,text/plain" @change="importPaletteFile($event.target.files[0]); $event.target.value = ''">
-                </header>
-                <div class="palette-content">
-                    <div class="palette-current">
-                        <span>Current</span>
-                        <label class="color-control" title="Color">
-                            <input type="color" x-model="color" aria-label="Drawing color">
-                        </label>
-                    </div>
-                    <div class="palette-control">
-                        <div class="quantization">
-                            <span>Colors</span>
-                            <input
-                                type="range"
-                                min="1"
-                                :max="quantizationMax"
-                                :value="quantization"
-                                @pointerdown="beginQuantization()"
-                                @input="quantizeActiveLayer($event.target.value)"
-                                aria-label="Color quantization"
-                            >
-                            <output x-text="quantization"></output>
-                            <button
-                                type="button"
-                                class="quantization-confirm"
-                                :disabled="!quantizationPending"
-                                @click="confirmQuantization()"
-                                title="Apply quantization"
-                                aria-label="Apply quantization"
-                            >
-                                <i data-lucide="check"></i>
-                            </button>
-                        </div>
-                        <div class="swatches" aria-label="Color swatches">
-                            <template x-for="swatch in palette" :key="swatch">
-                                <button type="button" class="swatch" :class="{ selected: color === swatch }" :style="`--swatch: ${swatch}`" @click="highlightPaletteColor(swatch); color = swatch; tool = 'pencil'" :title="swatch" :aria-label="`Use ${swatch}`"></button>
-                            </template>
-                        </div>
-                    </div>
-                </div>
-            </aside>
-
             <section
                 class="workspace"
                 :class="{ 'drop-active': dropActive }"
@@ -177,19 +122,32 @@
                         ></div>
                         <div class="pixel-cursor" x-show="hoverPoint && !voxelReady" :style="hoverStyle()" aria-hidden="true"></div>
                     </div>
-                    <div class="future-window">
+                    <div class="canvas-zoom" :class="{ 'rotation-hidden': voxelRotating }">
+                        <label>
+                            <span>Zoom</span>
+                            <input type="range" min="0.5" max="4" step="0.1" :value="voxelZoom" @input="setVoxelZoom($event.target.value)" aria-label="Canvas zoom">
+                            <output x-text="`${voxelZoom.toFixed(1)}x`"></output>
+                        </label>
+                        <div class="zoom-steps" aria-hidden="true">
+                            <span>0.5</span><span>1</span><span>1.5</span><span>2</span><span>2.5</span><span>3</span><span>3.5</span><span>4</span>
+                        </div>
+                    </div>
+                    <div class="future-window" :class="{ 'rotation-hidden': voxelRotating }">
                         <canvas
                             x-ref="previewCanvas"
                             class="model-preview"
-                            @pointerdown="startPreviewRotation($event)"
-                            @pointermove="continuePreviewRotation($event)"
-                            @pointerup.window="endPreviewRotation($event)"
-                            @pointercancel.window="endPreviewRotation($event)"
+                            @pointerdown="startPreviewDrag($event)"
+                            @pointermove="continuePreviewDrag($event)"
+                            @pointerup.window="endPreviewDrag($event)"
+                            @pointercancel.window="endPreviewDrag($event)"
                             @auxclick.prevent
                             @contextmenu.prevent
-                            aria-label="Rotatable model preview"
+                            aria-label="Pannable, rotatable, and zoomable model preview"
                         ></canvas>
-                        <div class="preview-presets" role="group" aria-label="Preview camera presets">
+                        <div class="preview-presets" role="group" aria-label="Preview controls">
+                            <button type="button" @click="resetPreviewPosition()" title="Return to origin" aria-label="Return preview to origin">
+                                <i data-lucide="crosshair"></i>
+                            </button>
                             <button type="button" @click="setPreviewView('perspective')" title="Perspective view" aria-label="Perspective view">
                                 <i data-lucide="box"></i>
                             </button>
@@ -205,13 +163,15 @@
                         </div>
                     </div>
                 </div>
+                <canvas x-ref="voxelBoundsCanvas" class="voxel-bounds-canvas" aria-hidden="true"></canvas>
                 <div class="drop-indicator" x-show="dropActive" aria-hidden="true">
                     <i data-lucide="image-down"></i>
                 </div>
             </section>
 
             <aside class="layers-panel">
-                <header class="layers-header">
+                <section class="layers-section">
+                    <header class="layers-header">
                     <div class="orientation-tabs" role="tablist" aria-label="Model orientation">
                         <template x-for="orientation in orientations" :key="orientation.id">
                             <button
@@ -228,17 +188,17 @@
                         <button type="button" @click="addLayer()" title="New layer" aria-label="New layer">
                             <i data-lucide="plus"></i>
                         </button>
-                        <button type="button" @click="duplicateLayer()" title="Duplicate layer" aria-label="Duplicate layer">
+                        <button type="button" @click="duplicateLayer()" :disabled="!activeLayerId" title="Duplicate layer" aria-label="Duplicate layer">
                             <i data-lucide="copy"></i>
                         </button>
-                        <button type="button" @click="removeLayer()" :disabled="layers.length === 1" title="Delete layer" aria-label="Delete layer">
+                        <button type="button" @click="removeLayer()" :disabled="layers.length <= 1" title="Delete layer" aria-label="Delete layer">
                             <i data-lucide="trash-2"></i>
                         </button>
                     </div>
-                </header>
+                    </header>
 
-                <div class="layers-list">
-                    <template x-for="layer in layers" :key="layer.id">
+                    <div class="layers-list">
+                        <template x-for="layer in layers" :key="layer.id">
                         <div
                             class="layer-row"
                             :class="{ active: activeLayerId === layer.id, dragging: draggedLayerId === layer.id }"
@@ -272,7 +232,7 @@
                                 <input
                                     class="layer-depth"
                                     type="number"
-                                    :min="layers[layers.indexOf(layer) + 1]?.depth ?? 1"
+                                    min="1"
                                     :value="layer.depth"
                                     @input="setLayerDepth(layer, $event.target)"
                                     @pointerdown.stop="activeLayerId = layer.id"
@@ -288,7 +248,7 @@
                                     :max="Math.max(0, (layers[layers.indexOf(layer) - 1]?.depth ?? layer.depth) - layer.depth)"
                                     step="1"
                                     :value="layer.offset"
-                                    :disabled="layers.indexOf(layer) === 0 || layer.depth === layers[layers.indexOf(layer) - 1]?.depth"
+                                    :disabled="layers.indexOf(layer) === 0 || layer.depth >= layers[layers.indexOf(layer) - 1]?.depth"
                                     draggable="false"
                                     @input="setLayerOffset(layer, $event.target)"
                                     @pointerdown.stop="activeLayerId = layer.id; editingLayerId = layer.id"
@@ -302,8 +262,58 @@
                                 >
                             </div>
                         </div>
-                    </template>
-                </div>
+                        </template>
+                    </div>
+                </section>
+
+                <section class="palette-panel">
+                    <header class="palette-header">
+                        <h2>Colors</h2>
+                        <button type="button" @click="$refs.paletteInput.click()" title="Import GPL palette" aria-label="Import GPL palette">
+                            <i data-lucide="upload"></i>
+                        </button>
+                        <input x-ref="paletteInput" class="file-input" type="file" accept=".gpl,text/plain" @change="importPaletteFile($event.target.files[0]); $event.target.value = ''">
+                    </header>
+                    <div class="palette-content">
+                        <div class="palette-current">
+                            <span>Current</span>
+                            <label class="color-control" title="Color">
+                                <input type="color" x-model="color" aria-label="Drawing color">
+                            </label>
+                        </div>
+                        <div class="palette-control">
+                            <div class="quantization">
+                                <span>Colors</span>
+                                <input
+                                    type="range"
+                                    min="1"
+                                    :max="quantizationMax"
+                                    :value="quantization"
+                                    :disabled="!activeLayerId"
+                                    @pointerdown="beginQuantization()"
+                                    @input="quantizeActiveLayer($event.target.value)"
+                                    aria-label="Color quantization"
+                                >
+                                <output x-text="quantization"></output>
+                                <button
+                                    type="button"
+                                    class="quantization-confirm"
+                                    :disabled="!quantizationPending"
+                                    @click="confirmQuantization()"
+                                    title="Apply quantization"
+                                    aria-label="Apply quantization"
+                                >
+                                    <i data-lucide="check"></i>
+                                </button>
+                            </div>
+                            <div class="swatches" aria-label="Color swatches">
+                                <template x-for="swatch in palette" :key="swatch">
+                                    <button type="button" class="swatch" :class="{ selected: color === swatch }" :style="`--swatch: ${swatch}`" @click="highlightPaletteColor(swatch); color = swatch; tool = 'pencil'" :title="swatch" :aria-label="`Use ${swatch}`"></button>
+                                </template>
+                            </div>
+                        </div>
+                    </div>
+                </section>
             </aside>
         </div>
     </main>

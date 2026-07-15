@@ -1,5 +1,5 @@
 const CANVAS_SIZE = 64;
-const LAYER_PADDING = 64;
+const LAYER_PADDING = 0;
 const LAYER_SIZE = CANVAS_SIZE + LAYER_PADDING * 2;
 const CANVAS_CONTEXT_OPTIONS = { colorSpace: "srgb", willReadFrequently: true };
 const ORIENTATIONS = [
@@ -24,6 +24,7 @@ const layerDepthRanges = (layers) => {
     }
     return ranges;
 };
+const modelDepth = (layers) => Math.max(1, ...[...layerDepthRanges(layers).values()].map((range) => range.end));
 const containsDepthZ = (range, z) => z >= range.start && z < range.end;
 
 const maskIndex = (x, y) => (y + LAYER_PADDING) * LAYER_SIZE + x + LAYER_PADDING;
@@ -209,6 +210,9 @@ document.addEventListener("alpine:init", () => {
         let voxelSelection = null;
         let voxelSelectionFrame = null;
         let voxelGrid = null;
+        let voxelBoundsCanvas = null;
+        let voxelBoundsContext = null;
+        let voxelBoundsVisible = false;
         let voxelRotation = null;
         let voxelSnapFrame = null;
         let voxelResizeObserver = null;
@@ -218,7 +222,7 @@ document.addEventListener("alpine:init", () => {
         let previewCamera = null;
         let previewRoot = null;
         let previewModelRoot = null;
-        let previewRotation = null;
+        let previewDrag = null;
         let previewResizeObserver = null;
         const voxelLayerMeshes = new Map();
         const voxelFaceMeshes = new Map();
@@ -242,6 +246,8 @@ document.addEventListener("alpine:init", () => {
             verticalSymmetry: false,
             horizontalSymmetry: false,
             voxelReady: false,
+            voxelRotating: false,
+            voxelZoom: 1,
             orientations: ORIENTATIONS,
             activeOrientation: "front",
             layers: [],
@@ -276,7 +282,7 @@ document.addEventListener("alpine:init", () => {
                     this.renderVoxelScene();
                 });
                 window.addEventListener("blur", () => { internalClipboard = null; });
-                this.addLayer("Layer 1", false);
+                this.render();
                 this.refreshUI();
                 import("https://cdn.jsdelivr.net/npm/three@0.170.0/build/three.module.min.js")
                     .then((module) => { THREE = module; this.initVoxelScene(); })
@@ -291,10 +297,15 @@ document.addEventListener("alpine:init", () => {
                 voxelRenderer.toneMapping = THREE.NoToneMapping;
                 voxelRenderer.getContext().disable(voxelRenderer.getContext().DITHER);
                 voxelScene = new THREE.Scene();
-                voxelScene.background = new THREE.Color(0x15181a);
-                const viewSize = 72;
+                voxelScene.background = new THREE.Color(0xffffff);
+                const viewSize = CANVAS_SIZE;
                 voxelCamera = new THREE.OrthographicCamera(-viewSize / 2, viewSize / 2, viewSize / 2, -viewSize / 2, 0.1, 20000);
                 voxelCamera.position.z = 10000;
+                voxelCamera.zoom = this.voxelZoom;
+                this.$refs.canvas.addEventListener("wheel", (event) => {
+                    event.preventDefault();
+                    this.setVoxelZoom(voxelCamera.zoom * Math.exp(-event.deltaY * 0.001));
+                }, { passive: false });
                 voxelRoot = new THREE.Group();
                 voxelScene.add(voxelRoot);
                 voxelViewRoot = new THREE.Group();
@@ -302,6 +313,9 @@ document.addEventListener("alpine:init", () => {
                 const orientation = this.orientationRotation();
                 voxelRoot.rotation.set(orientation.x, orientation.y, 0);
                 voxelViewRoot.rotation.set(-orientation.x, -orientation.y, 0);
+
+                voxelBoundsCanvas = this.$refs.voxelBoundsCanvas;
+                voxelBoundsContext = voxelBoundsCanvas.getContext("2d");
 
                 const checker = document.createElement("canvas");
                 checker.width = checker.height = 16;
@@ -424,10 +438,14 @@ document.addEventListener("alpine:init", () => {
                     voxelCamera.top = viewSize / 2;
                     voxelCamera.bottom = -viewSize / 2;
                     voxelCamera.updateProjectionMatrix();
+                    const boundsSize = voxelBoundsCanvas.getBoundingClientRect();
+                    voxelBoundsCanvas.width = Math.round(boundsSize.width * window.devicePixelRatio);
+                    voxelBoundsCanvas.height = Math.round(boundsSize.height * window.devicePixelRatio);
                     this.renderVoxelScene();
                 };
                 voxelResizeObserver = new ResizeObserver(resize);
                 voxelResizeObserver.observe(canvas);
+                voxelResizeObserver.observe(voxelBoundsCanvas);
                 this.voxelReady = true;
                 resize();
                 this.initPreviewScene();
@@ -436,6 +454,45 @@ document.addEventListener("alpine:init", () => {
 
             renderVoxelScene() {
                 if (voxelRenderer) voxelRenderer.render(voxelScene, voxelCamera);
+                this.renderVoxelBounds();
+            },
+
+            setVoxelZoom(value) {
+                this.voxelZoom = Math.max(0.5, Math.min(4, Number(value) || 1));
+                if (!voxelCamera) return;
+                voxelCamera.zoom = this.voxelZoom;
+                voxelCamera.updateProjectionMatrix();
+                this.renderVoxelScene();
+            },
+
+            renderVoxelBounds() {
+                if (!voxelBoundsContext) return;
+                voxelBoundsContext.clearRect(0, 0, voxelBoundsCanvas.width, voxelBoundsCanvas.height);
+                if (!voxelBoundsVisible) return;
+                const boundsRect = voxelBoundsCanvas.getBoundingClientRect();
+                const canvasRect = this.$refs.voxelCanvas.getBoundingClientRect();
+                voxelRoot.updateMatrixWorld(true);
+                const vertices = [
+                    [-32, -32, 0], [32, -32, 0], [32, 32, 0], [-32, 32, 0],
+                    [-32, -32, 64], [32, -32, 64], [32, 32, 64], [-32, 32, 64],
+                ].map(([x, y, z]) => {
+                    const point = new THREE.Vector3(x, y, z).applyMatrix4(voxelRoot.matrixWorld).project(voxelCamera);
+                    return [
+                        canvasRect.left - boundsRect.left + (point.x + 1) * canvasRect.width / 2,
+                        canvasRect.top - boundsRect.top + (1 - point.y) * canvasRect.height / 2,
+                    ];
+                });
+                const scale = window.devicePixelRatio;
+                voxelBoundsContext.setTransform(scale, 0, 0, scale, 0, 0);
+                voxelBoundsContext.strokeStyle = "#ff00ff";
+                voxelBoundsContext.lineWidth = 1;
+                voxelBoundsContext.beginPath();
+                for (const [start, end] of [[0, 1], [1, 2], [2, 3], [3, 0], [4, 5], [5, 6], [6, 7], [7, 4], [0, 4], [1, 5], [2, 6], [3, 7]]) {
+                    voxelBoundsContext.moveTo(...vertices[start]);
+                    voxelBoundsContext.lineTo(...vertices[end]);
+                }
+                voxelBoundsContext.stroke();
+                voxelBoundsContext.resetTransform();
             },
 
             initPreviewScene() {
@@ -449,6 +506,12 @@ document.addEventListener("alpine:init", () => {
                 previewScene.background = new THREE.Color(0xffffff);
                 previewCamera = new THREE.OrthographicCamera(-50, 50, 50, -50, 0.1, 20000);
                 previewCamera.position.z = 10000;
+                canvas.addEventListener("wheel", (event) => {
+                    event.preventDefault();
+                    previewCamera.zoom = THREE.MathUtils.clamp(previewCamera.zoom * Math.exp(-event.deltaY * 0.001), 0.5, 4);
+                    previewCamera.updateProjectionMatrix();
+                    this.renderPreviewScene();
+                }, { passive: false });
                 previewRoot = new THREE.Group();
                 previewRoot.rotation.set(Math.PI / 6, -Math.PI / 4, 0);
                 previewModelRoot = new THREE.Group();
@@ -495,35 +558,52 @@ document.addEventListener("alpine:init", () => {
                 };
                 for (const [id, mesh] of voxelLayerMeshes) syncMesh(mesh, id, previewLayerMeshes);
                 for (const [key, mesh] of voxelFaceMeshes) syncMesh(mesh, key, previewFaceMeshes);
-                previewModelRoot.position.z = -(this.layers.length ? Math.max(...this.layers.map(layerDepth)) : 1) / 2;
+                previewModelRoot.position.z = -modelDepth(this.layers) / 2;
                 this.renderPreviewScene();
             },
 
-            startPreviewRotation(event) {
-                if ((event.button !== 0 && event.button !== 1) || !previewRoot) return;
+            startPreviewDrag(event) {
+                if ((event.button !== 0 && event.button !== 2) || !previewRoot) return;
                 event.preventDefault();
                 event.currentTarget.setPointerCapture(event.pointerId);
-                previewRotation = {
+                previewDrag = {
                     canvas: event.currentTarget,
                     pointerId: event.pointerId,
+                    mode: event.button === 0 ? "pan" : "rotate",
                     clientX: event.clientX,
                     clientY: event.clientY,
+                    positionX: previewRoot.position.x,
+                    positionY: previewRoot.position.y,
                     rotationX: previewRoot.rotation.x,
                     rotationY: previewRoot.rotation.y,
+                    panScale: 100 / (event.currentTarget.getBoundingClientRect().height * previewCamera.zoom),
                 };
             },
 
-            continuePreviewRotation(event) {
-                if (event.pointerId !== previewRotation?.pointerId) return;
-                previewRoot.rotation.x = previewRotation.rotationX + (event.clientY - previewRotation.clientY) * 0.01;
-                previewRoot.rotation.y = previewRotation.rotationY + (event.clientX - previewRotation.clientX) * 0.01;
+            continuePreviewDrag(event) {
+                if (event.pointerId !== previewDrag?.pointerId) return;
+                const deltaX = event.clientX - previewDrag.clientX;
+                const deltaY = event.clientY - previewDrag.clientY;
+                if (previewDrag.mode === "pan") {
+                    previewRoot.position.x = previewDrag.positionX + deltaX * previewDrag.panScale;
+                    previewRoot.position.y = previewDrag.positionY - deltaY * previewDrag.panScale;
+                } else {
+                    previewRoot.rotation.x = previewDrag.rotationX + deltaY * 0.01;
+                    previewRoot.rotation.y = previewDrag.rotationY + deltaX * 0.01;
+                }
                 this.renderPreviewScene();
             },
 
-            endPreviewRotation(event) {
-                if (event.pointerId !== previewRotation?.pointerId) return;
-                if (previewRotation.canvas.hasPointerCapture(event.pointerId)) previewRotation.canvas.releasePointerCapture(event.pointerId);
-                previewRotation = null;
+            endPreviewDrag(event) {
+                if (event.pointerId !== previewDrag?.pointerId) return;
+                if (previewDrag.canvas.hasPointerCapture(event.pointerId)) previewDrag.canvas.releasePointerCapture(event.pointerId);
+                previewDrag = null;
+            },
+
+            resetPreviewPosition() {
+                if (!previewRoot) return;
+                previewRoot.position.set(0, 0, 0);
+                this.renderPreviewScene();
             },
 
             setPreviewView(view) {
@@ -610,9 +690,9 @@ document.addEventListener("alpine:init", () => {
                 const visibleLayers = this.layers.filter((layer) => layer.visible);
                 const visibleIds = new Set(visibleLayers.map((layer) => layer.id));
                 const visibleFaceKeys = new Set();
-                const modelDepth = this.layers.length ? Math.max(...this.layers.map(layerDepth)) : 1;
+                const modelExtent = modelDepth(this.layers);
                 const ranges = layerDepthRanges(this.layers);
-                const editingSurface = this.activeOrientation === "front" ? modelDepth : this.activeOrientation === "back" ? 0 : CANVAS_SIZE / 2;
+                const editingSurface = this.activeOrientation === "front" ? modelExtent : this.activeOrientation === "back" ? 0 : CANVAS_SIZE / 2;
                 voxelGrid.position.z = editingSurface + visibleLayers.length * 0.001 + 0.01;
                 for (const [index, layer] of visibleLayers.entries()) {
                     let mesh = voxelLayerMeshes.get(layer.id);
@@ -802,8 +882,10 @@ document.addEventListener("alpine:init", () => {
 
             perspectiveMask(id = this.activeLayerId, orientation = this.activeOrientation) {
                 const mask = new Uint8Array(CANVAS_SIZE * CANVAS_SIZE);
-                const front = this.canvasFor(id, "front").getContext("2d").getImageData(LAYER_PADDING, LAYER_PADDING, CANVAS_SIZE, CANVAS_SIZE).data;
+                const frontCanvas = this.canvasFor(id, "front");
                 const layer = this.layers.find((candidate) => candidate.id === id);
+                if (!frontCanvas || !layer) return mask;
+                const front = frontCanvas.getContext("2d").getImageData(LAYER_PADDING, LAYER_PADDING, CANVAS_SIZE, CANVAS_SIZE).data;
                 const range = layerDepthRanges(this.layers).get(layer.id);
                 const rowHasPixels = new Uint8Array(CANVAS_SIZE);
                 const columnHasPixels = new Uint8Array(CANVAS_SIZE);
@@ -840,7 +922,10 @@ document.addEventListener("alpine:init", () => {
             updatePalette(maxColors = 64, image = null) {
                 const key = this.layerViewKey();
                 const canvas = this.canvasFor();
-                if (!canvas) return 0;
+                if (!canvas) {
+                    if (this.palette.length) this.palette = [];
+                    return 0;
+                }
                 const source = image ?? canvas.getContext("2d").getImageData(LAYER_PADDING, LAYER_PADDING, CANVAS_SIZE, CANVAS_SIZE);
                 const pixels = source.data;
                 const visible = this.perspectiveMask();
@@ -889,7 +974,9 @@ document.addEventListener("alpine:init", () => {
             },
 
             highlightPaletteColor(color) {
-                const pixels = this.activeContext().getImageData(LAYER_PADDING, LAYER_PADDING, CANVAS_SIZE, CANVAS_SIZE).data;
+                const source = this.canvasFor();
+                if (!source) return;
+                const pixels = source.getContext("2d").getImageData(LAYER_PADDING, LAYER_PADDING, CANVAS_SIZE, CANVAS_SIZE).data;
                 const visible = this.perspectiveMask();
                 const canvas = this.$refs.paletteHighlight;
                 const context = canvas.getContext("2d");
@@ -999,10 +1086,12 @@ document.addEventListener("alpine:init", () => {
             beginQuantization() {
                 const key = this.layerViewKey();
                 if (quantizationSource?.key === key) return;
+                const canvas = this.canvasFor();
+                if (!canvas) return;
                 quantizationSource = {
                     key,
                     id: this.activeLayerId,
-                    pixels: this.activeContext().getImageData(0, 0, LAYER_SIZE, LAYER_SIZE),
+                    pixels: canvas.getContext("2d").getImageData(0, 0, LAYER_SIZE, LAYER_SIZE),
                     recorded: false,
                 };
             },
@@ -1010,6 +1099,7 @@ document.addEventListener("alpine:init", () => {
             quantizeActiveLayer(value) {
                 this.quantization = Math.max(1, Math.min(64, Number(value) || 1));
                 if (quantizationSource?.key !== this.layerViewKey()) this.beginQuantization();
+                if (!quantizationSource) return;
                 if (!quantizationSource.recorded) {
                     this.pushHistory(false);
                     quantizationSource.recorded = true;
@@ -1071,6 +1161,10 @@ document.addEventListener("alpine:init", () => {
                 return layer;
             },
 
+            ensureActiveLayer() {
+                return this.layers.find((layer) => layer.id === this.activeLayerId) ?? this.addLayer(undefined, false);
+            },
+
             duplicateLayer() {
                 const source = this.layers.find((layer) => layer.id === this.activeLayerId);
                 if (!source) return;
@@ -1100,7 +1194,7 @@ document.addEventListener("alpine:init", () => {
             },
 
             removeLayer() {
-                if (this.layers.length === 1) return;
+                if (this.layers.length <= 1) return;
                 this.pushHistory();
                 const index = this.layers.findIndex((layer) => layer.id === this.activeLayerId);
                 for (const orientation of ORIENTATIONS) {
@@ -1123,22 +1217,13 @@ document.addEventListener("alpine:init", () => {
             },
 
             setLayerDepth(layer, input) {
-                const index = this.layers.indexOf(layer);
-                const previousDepth = layerDepth(this.layers[index + 1]);
-                const depth = Math.max(Math.floor(Number(input.value) || 1), previousDepth);
+                const depth = layerDepth({ depth: input.value });
                 input.value = depth;
-                if (layerDepth(layer) === depth && this.layers.every((candidate, index) => !index || layerDepth(this.layers[index - 1]) >= layerDepth(candidate))) return;
+                if (layerDepth(layer) === depth) return;
                 this.pushHistory();
                 layer.depth = depth;
-                this.normalizeLayerDepths();
                 this.normalizeLayerOffsets();
                 this.render();
-            },
-
-            normalizeLayerDepths() {
-                for (let index = this.layers.length - 2; index >= 0; index--) {
-                    this.layers[index].depth = Math.max(layerDepth(this.layers[index]), layerDepth(this.layers[index + 1]));
-                }
             },
 
             normalizeLayerOffsets() {
@@ -1184,7 +1269,6 @@ document.addEventListener("alpine:init", () => {
                 }
                 const [layer] = this.layers.splice(from, 1);
                 this.layers.splice(to, 0, layer);
-                this.normalizeLayerDepths();
                 this.normalizeLayerOffsets();
                 this.render();
             },
@@ -1443,6 +1527,8 @@ document.addEventListener("alpine:init", () => {
                     rotationY: voxelRoot.rotation.y,
                 };
                 voxelGrid.visible = false;
+                voxelBoundsVisible = true;
+                this.voxelRotating = true;
                 this.capturePointer(event);
                 this.clearHover();
             },
@@ -1477,6 +1563,8 @@ document.addEventListener("alpine:init", () => {
                         voxelSnapFrame = null;
                         voxelRoot.rotation.set(target.x, target.y, 0);
                         voxelGrid.visible = this.gridVisible;
+                        voxelBoundsVisible = false;
+                        this.voxelRotating = false;
                     }
                     this.renderVoxelScene();
                 };
@@ -1521,9 +1609,11 @@ document.addEventListener("alpine:init", () => {
             },
 
             magicSelect(event) {
+                const context = this.canvasFor()?.getContext("2d");
+                if (!context) return;
                 event.preventDefault();
                 const point = this.pointFromEvent(event);
-                const pixels = this.activeContext().getImageData(LAYER_PADDING, LAYER_PADDING, CANVAS_SIZE, CANVAS_SIZE).data;
+                const pixels = context.getImageData(LAYER_PADDING, LAYER_PADDING, CANVAS_SIZE, CANVAS_SIZE).data;
                 const start = (point.y * CANVAS_SIZE + point.x) * 4;
                 const cached = quantizedPalettes.get(this.layerViewKey());
                 const target = hexColor(this.palettePixelColor(pixels, start, cached));
@@ -1560,6 +1650,12 @@ document.addEventListener("alpine:init", () => {
                 event.preventDefault();
                 const point = this.pointFromEvent(event);
                 if (selectionMask && !this.containsPoint(point)) return;
+                let activeLayer = this.layers.find((layer) => layer.id === this.activeLayerId);
+                const hadLayer = !!activeLayer;
+                if (!hadLayer) {
+                    this.pushHistory();
+                    activeLayer = this.ensureActiveLayer();
+                }
                 const context = this.activeContext();
                 const image = context.getImageData(LAYER_PADDING, LAYER_PADDING, CANVAS_SIZE, CANVAS_SIZE);
                 const pixels = image.data;
@@ -1574,7 +1670,7 @@ document.addEventListener("alpine:init", () => {
                 const tolerance = Math.max(0, Math.min(255, Number(this.wandTolerance) || 0));
                 const visited = new Uint8Array(CANVAS_SIZE * CANVAS_SIZE);
                 const stack = [start];
-                this.pushHistory();
+                if (hadLayer) this.pushHistory();
                 this.markViewEdited();
                 while (stack.length) {
                     const index = stack.pop();
@@ -1593,7 +1689,6 @@ document.addEventListener("alpine:init", () => {
                     if (y > 0) stack.push(index - CANVAS_SIZE);
                     if (y < CANVAS_SIZE - 1) stack.push(index + CANVAS_SIZE);
                 }
-                const activeLayer = this.layers.find((layer) => layer.id === this.activeLayerId);
                 activeLayer.visible = true;
                 context.putImageData(image, LAYER_PADDING, LAYER_PADDING);
                 this.render();
@@ -1611,6 +1706,18 @@ document.addEventListener("alpine:init", () => {
             sampleColor(event) {
                 if (event.pointerId !== this.pointerId) return;
                 const point = this.pointFromEvent(event);
+                if (voxelRaycaster && voxelRoot) {
+                    voxelRoot.updateMatrixWorld(true);
+                    const hit = voxelRaycaster.intersectObjects([
+                        ...voxelFaceMeshes.values(),
+                        ...voxelLayerMeshes.values(),
+                    ].filter((mesh) => mesh.visible), false)[0];
+                    if (!hit || hit.instanceId == null) return;
+                    const color = new THREE.Color();
+                    hit.object.getColorAt(hit.instanceId, color);
+                    this.color = `#${color.getHexString(THREE.SRGBColorSpace)}`;
+                    return;
+                }
                 const pixel = this.context.getImageData(point.x, point.y, 1, 1).data;
                 if (!pixel[3]) return;
                 this.color = this.canonicalPixelColor(pixel, 0);
@@ -1623,7 +1730,7 @@ document.addEventListener("alpine:init", () => {
             },
 
             startSelection(event) {
-                if (this.pointerId !== null) return;
+                if (this.pointerId !== null || !this.canvasFor()) return;
                 event.preventDefault();
                 this.pointerId = event.pointerId;
                 this.capturePointer(event);
@@ -1676,6 +1783,7 @@ document.addEventListener("alpine:init", () => {
 
             startMove(event) {
                 if (this.pointerId !== null) return;
+                if (!this.canvasFor()) return;
                 if (!this.selection) this.selectLayerPixels();
                 if (!this.selection) return;
                 const point = this.worldPointFromEvent(event);
@@ -1775,12 +1883,12 @@ document.addEventListener("alpine:init", () => {
             },
 
             startStroke(event) {
-                if (this.drawing) return;
+                if (this.drawing || (this.tool === "eraser" && !this.canvasFor())) return;
                 event.preventDefault();
                 this.pushHistory();
+                const activeLayer = this.ensureActiveLayer();
                 this.markViewEdited();
                 if (this.tool === "pencil") this.allowPaletteColor();
-                const activeLayer = this.layers.find((layer) => layer.id === this.activeLayerId);
                 activeLayer.visible = true;
                 this.drawing = true;
                 this.pointerId = event.pointerId;
@@ -1852,7 +1960,6 @@ document.addEventListener("alpine:init", () => {
                     canvases.set(pixels.key, canvas);
                 }
                 this.layers = snapshot.layers.map((layer) => ({ ...layer, depth: layerDepth(layer), offset: Math.max(0, Math.floor(Number(layer.offset) || 0)) }));
-                this.normalizeLayerDepths();
                 this.normalizeLayerOffsets();
                 this.activeLayerId = snapshot.activeLayerId;
                 editedViews.clear();
@@ -1888,6 +1995,7 @@ document.addEventListener("alpine:init", () => {
             },
 
             clearCanvas() {
+                if (!this.canvasFor()) return;
                 this.pushHistory();
                 this.markViewEdited();
                 if (selectionMask) clearMaskedPixels(this.activeContext(), selectionMask);
@@ -1896,7 +2004,7 @@ document.addEventListener("alpine:init", () => {
             },
 
             translateSelection(dx, dy) {
-                if (!this.selection) return;
+                if (!this.selection || !this.canvasFor()) return;
                 const selection = { ...this.selection };
                 dx = Math.max(-LAYER_PADDING - selection.x, Math.min(CANVAS_SIZE + LAYER_PADDING - selection.x - selection.width, dx));
                 dy = Math.max(-LAYER_PADDING - selection.y, Math.min(CANVAS_SIZE + LAYER_PADDING - selection.y - selection.height, dy));
@@ -1914,7 +2022,7 @@ document.addEventListener("alpine:init", () => {
             },
 
             copySelection(cut = false) {
-                if (!selectionMask || !this.selection) return;
+                if (!selectionMask || !this.selection || !this.canvasFor()) return;
                 const mask = new Uint8Array(selectionMask);
                 const bounds = { ...this.selection };
                 const pixels = selectionPixels(this.canvasFor(), mask, bounds);
