@@ -306,10 +306,10 @@ button svg {
 }
 
 .workspace-content {
-    width: min(100%, calc(min(78vmin, 768px) + 244px));
+    width: 100%;
     min-width: 0;
     display: grid;
-    grid-template-columns: minmax(0, 1fr) 224px;
+    grid-template-columns: minmax(0, min(78vmin, 768px)) minmax(0, 1fr);
     align-items: end;
     gap: 8px 20px;
 }
@@ -325,10 +325,11 @@ button svg {
     position: relative;
     grid-column: 2;
     grid-row: 1;
-    width: 224px;
+    width: min(100%, calc(100vh - 96px));
     aspect-ratio: 1;
+    justify-self: end;
     overflow: hidden;
-    border: 1px solid #c9c9c9;
+    border: 1px solid #4b5155;
     background: #ffffff;
     box-shadow: 0 6px 18px rgb(0 0 0 / 28%);
 }
@@ -386,34 +387,34 @@ button svg {
 
 .preview-presets {
     position: absolute;
-    right: 4px;
-    bottom: 4px;
-    left: 4px;
+    right: 8px;
+    bottom: 8px;
+    left: 8px;
     display: grid;
     grid-template-columns: repeat(5, 1fr);
-    gap: 2px;
+    gap: 4px;
     pointer-events: none;
 }
 
 .preview-presets button {
-    width: 24px;
-    height: 22px;
-    border-color: #c9c9c9;
-    border-radius: 3px;
-    background: rgb(255 255 255 / 88%);
-    color: #202427;
+    width: 100%;
+    height: 32px;
+    border-color: #4b5155;
+    border-radius: 5px;
+    background: rgb(27 30 33 / 92%);
+    color: #c9cdcf;
     pointer-events: auto;
 }
 
 .preview-presets button:hover:not(:disabled) {
-    border-color: #666d71;
-    background: #ffffff;
-    color: #111315;
+    border-color: #4b5155;
+    background: #292d30;
+    color: #ffffff;
 }
 
 .preview-presets button svg {
-    width: 13px;
-    height: 13px;
+    width: 18px;
+    height: 18px;
 }
 
 .canvas-frame > canvas,
@@ -767,12 +768,11 @@ button svg {
     }
 
     .future-window {
-        width: 192px;
-        justify-self: end;
+        width: 100%;
+        justify-self: stretch;
     }
 
     .preview-presets button {
-        width: 20px;
-        height: 20px;
+        height: 30px;
     }
 }
