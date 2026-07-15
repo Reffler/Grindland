@@ -1,6 +1,30 @@
 const CANVAS_SIZE = 64;
 const LAYER_PADDING = 64;
 const LAYER_SIZE = CANVAS_SIZE + LAYER_PADDING * 2;
+const CANVAS_CONTEXT_OPTIONS = { colorSpace: "srgb", willReadFrequently: true };
+const ORIENTATIONS = [
+    { id: "front", label: "Front", x: 0, y: 0 },
+    { id: "back", label: "Back", x: 0, y: Math.PI },
+    { id: "right", label: "Right", x: 0, y: -Math.PI / 2 },
+    { id: "left", label: "Left", x: 0, y: Math.PI / 2 },
+    { id: "bottom", label: "Bottom", x: -Math.PI / 2, y: 0 },
+    { id: "top", label: "Top", x: Math.PI / 2, y: 0 },
+];
+
+const viewKey = (orientation, id) => `${orientation}:${id}`;
+const layerDepth = (layer) => Math.max(1, Math.floor(Number(layer?.depth) || 1));
+const layerOffset = (layer, max) => Math.max(0, Math.min(max, Math.floor(Number(layer?.offset) || 0)));
+const layerDepthRanges = (layers) => {
+    const ranges = new Map();
+    let start = 0;
+    for (let index = 0; index < layers.length; index++) {
+        const layer = layers[index];
+        if (index) start += layerOffset(layer, layerDepth(layers[index - 1]) - layerDepth(layer));
+        ranges.set(layer.id, { start, end: start + layerDepth(layer) });
+    }
+    return ranges;
+};
+const containsDepthZ = (range, z) => z >= range.start && z < range.end;
 
 const maskIndex = (x, y) => (y + LAYER_PADDING) * LAYER_SIZE + x + LAYER_PADDING;
 
@@ -8,7 +32,7 @@ function createLayerCanvas() {
     const canvas = document.createElement("canvas");
     canvas.width = LAYER_SIZE;
     canvas.height = LAYER_SIZE;
-    canvas.getContext("2d", { willReadFrequently: true }).imageSmoothingEnabled = false;
+    canvas.getContext("2d", CANVAS_CONTEXT_OPTIONS).imageSmoothingEnabled = false;
     return canvas;
 }
 
@@ -90,7 +114,7 @@ function selectionPixels(source, mask, bounds) {
     const canvas = document.createElement("canvas");
     canvas.width = bounds.width;
     canvas.height = bounds.height;
-    const context = canvas.getContext("2d");
+    const context = canvas.getContext("2d", CANVAS_CONTEXT_OPTIONS);
     const pixels = source.getContext("2d").getImageData(bounds.x + LAYER_PADDING, bounds.y + LAYER_PADDING, bounds.width, bounds.height);
     for (let y = 0; y < bounds.height; y++) for (let x = 0; x < bounds.width; x++) {
         if (mask[maskIndex(bounds.x + x, bounds.y + y)]) continue;
@@ -99,15 +123,6 @@ function selectionPixels(source, mask, bounds) {
     }
     context.putImageData(pixels, 0, 0);
     return canvas;
-}
-
-function matchesColor(pixels, offset, target, tolerance) {
-    if (target[3] === 0) return pixels[offset + 3] <= tolerance;
-    const red = pixels[offset] - target[0];
-    const green = pixels[offset + 1] - target[1];
-    const blue = pixels[offset + 2] - target[2];
-    const colorDistance = Math.sqrt((red * red + green * green + blue * blue) / 3);
-    return colorDistance <= tolerance && Math.abs(pixels[offset + 3] - target[3]) <= tolerance;
 }
 
 function hexColor(hex) {
@@ -172,6 +187,7 @@ document.addEventListener("alpine:init", () => {
         let selectionAnchor = null;
         let selectionMask = null;
         let moveState = null;
+        let straightStroke = null;
         let internalClipboard = null;
         let pointerTarget = null;
         let quantizationSource = null;
@@ -181,19 +197,37 @@ document.addEventListener("alpine:init", () => {
         let voxelScene = null;
         let voxelCamera = null;
         let voxelRoot = null;
+        let voxelViewRoot = null;
         let voxelBackdrop = null;
         let voxelGeometry = null;
         let voxelMaterial = null;
         let voxelHighlightMesh = null;
         let voxelHighlightFrame = null;
         let voxelCursor = null;
+        const voxelMirrorCursors = [];
+        let voxelCrosshair = null;
+        let voxelSelection = null;
+        let voxelSelectionFrame = null;
         let voxelGrid = null;
         let voxelRotation = null;
         let voxelSnapFrame = null;
         let voxelResizeObserver = null;
         let voxelRaycaster = null;
+        let previewRenderer = null;
+        let previewScene = null;
+        let previewCamera = null;
+        let previewRoot = null;
+        let previewModelRoot = null;
+        let previewRotation = null;
+        let previewResizeObserver = null;
         const voxelLayerMeshes = new Map();
+        const voxelFaceMeshes = new Map();
+        const previewLayerMeshes = new Map();
+        const previewFaceMeshes = new Map();
+        const voxelFaceGeometries = new Map();
         const quantizedPalettes = new Map();
+        const paletteOrders = new Map();
+        const editedViews = new Set();
 
         return {
             tool: "pencil",
@@ -204,8 +238,12 @@ document.addEventListener("alpine:init", () => {
             wandTolerance: 32,
             color: "#202426",
             palette: [],
-            gridVisible: true,
+            gridVisible: false,
+            verticalSymmetry: false,
+            horizontalSymmetry: false,
             voxelReady: false,
+            orientations: ORIENTATIONS,
+            activeOrientation: "front",
             layers: [],
             activeLayerId: null,
             draggedLayerId: null,
@@ -214,6 +252,8 @@ document.addEventListener("alpine:init", () => {
             dropActive: false,
             selection: null,
             selectionPath: "",
+            centerGuideX: false,
+            centerGuideY: false,
             hoverPoint: null,
             history: [],
             future: [],
@@ -225,9 +265,12 @@ document.addEventListener("alpine:init", () => {
 
             init() {
                 if (this.context) return;
-                this.context = this.$refs.canvas.getContext("2d", { willReadFrequently: true });
+                this.context = this.$refs.canvas.getContext("2d", CANVAS_CONTEXT_OPTIONS);
                 this.context.imageSmoothingEnabled = false;
-                this.$watch("tool", () => this.confirmQuantization());
+                this.$watch("tool", () => {
+                    this.confirmQuantization();
+                    this.clearCenterGuides();
+                });
                 this.$watch("gridVisible", (visible) => {
                     if (voxelGrid) voxelGrid.visible = visible && !voxelRotation && !voxelSnapFrame;
                     this.renderVoxelScene();
@@ -242,19 +285,27 @@ document.addEventListener("alpine:init", () => {
 
             initVoxelScene() {
                 const canvas = this.$refs.voxelCanvas;
-                voxelRenderer = new THREE.WebGLRenderer({ canvas, antialias: true });
-                voxelRenderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
+                voxelRenderer = new THREE.WebGLRenderer({ canvas, antialias: false, alpha: false, premultipliedAlpha: false, precision: "highp" });
+                voxelRenderer.setPixelRatio(window.devicePixelRatio);
                 voxelRenderer.outputColorSpace = THREE.SRGBColorSpace;
+                voxelRenderer.toneMapping = THREE.NoToneMapping;
+                voxelRenderer.getContext().disable(voxelRenderer.getContext().DITHER);
                 voxelScene = new THREE.Scene();
                 voxelScene.background = new THREE.Color(0x15181a);
-                voxelCamera = new THREE.PerspectiveCamera(35, 1, 0.1, 400);
-                voxelCamera.position.z = 120;
+                const viewSize = 72;
+                voxelCamera = new THREE.OrthographicCamera(-viewSize / 2, viewSize / 2, viewSize / 2, -viewSize / 2, 0.1, 20000);
+                voxelCamera.position.z = 10000;
                 voxelRoot = new THREE.Group();
                 voxelScene.add(voxelRoot);
+                voxelViewRoot = new THREE.Group();
+                voxelRoot.add(voxelViewRoot);
+                const orientation = this.orientationRotation();
+                voxelRoot.rotation.set(orientation.x, orientation.y, 0);
+                voxelViewRoot.rotation.set(-orientation.x, -orientation.y, 0);
 
                 const checker = document.createElement("canvas");
                 checker.width = checker.height = 16;
-                const checkerContext = checker.getContext("2d");
+                const checkerContext = checker.getContext("2d", CANVAS_CONTEXT_OPTIONS);
                 checkerContext.fillStyle = "#e6e8e8";
                 checkerContext.fillRect(0, 0, 16, 16);
                 checkerContext.fillStyle = "#c7cbcc";
@@ -264,11 +315,15 @@ document.addEventListener("alpine:init", () => {
                 checkerTexture.wrapS = checkerTexture.wrapT = THREE.RepeatWrapping;
                 checkerTexture.repeat.set(8, 8);
                 checkerTexture.colorSpace = THREE.SRGBColorSpace;
+                checkerTexture.magFilter = THREE.NearestFilter;
+                checkerTexture.minFilter = THREE.NearestFilter;
+                checkerTexture.generateMipmaps = false;
                 voxelBackdrop = new THREE.Mesh(
                     new THREE.PlaneGeometry(CANVAS_SIZE, CANVAS_SIZE),
-                    new THREE.MeshBasicMaterial({ map: checkerTexture }),
+                    new THREE.MeshBasicMaterial({ map: checkerTexture, depthTest: false, depthWrite: false, toneMapped: false, dithering: false }),
                 );
-                voxelRoot.add(voxelBackdrop);
+                voxelBackdrop.renderOrder = -10;
+                voxelScene.add(voxelBackdrop);
 
                 voxelGrid = new THREE.GridHelper(CANVAS_SIZE, CANVAS_SIZE, 0x747b7f, 0x747b7f);
                 voxelGrid.rotation.x = Math.PI / 2;
@@ -276,10 +331,19 @@ document.addEventListener("alpine:init", () => {
                 voxelGrid.material.transparent = true;
                 voxelGrid.material.opacity = 0.28;
                 voxelGrid.visible = this.gridVisible;
-                voxelRoot.add(voxelGrid);
+                voxelViewRoot.add(voxelGrid);
 
                 voxelGeometry = new THREE.BoxGeometry(1.001, 1.001, 1);
-                voxelMaterial = new THREE.MeshBasicMaterial({ toneMapped: false });
+                voxelMaterial = new THREE.MeshBasicMaterial({ toneMapped: false, dithering: false, fog: false });
+                for (const orientation of ORIENTATIONS) {
+                    const geometry = new THREE.PlaneGeometry(1.002, 1.002);
+                    if (orientation.id === "back") geometry.rotateY(Math.PI);
+                    if (orientation.id === "right") geometry.rotateY(Math.PI / 2);
+                    if (orientation.id === "left") geometry.rotateY(-Math.PI / 2);
+                    if (orientation.id === "top") geometry.rotateX(-Math.PI / 2);
+                    if (orientation.id === "bottom") geometry.rotateX(Math.PI / 2);
+                    voxelFaceGeometries.set(orientation.id, geometry);
+                }
                 voxelHighlightMesh = new THREE.InstancedMesh(
                     new THREE.BoxGeometry(1.02, 1.02, 1.06),
                     new THREE.MeshBasicMaterial({ color: 0xffffff, transparent: true, opacity: 0, depthWrite: false }),
@@ -287,14 +351,64 @@ document.addEventListener("alpine:init", () => {
                 );
                 voxelHighlightMesh.count = 0;
                 voxelHighlightMesh.renderOrder = 10;
-                voxelRoot.add(voxelHighlightMesh);
+                voxelViewRoot.add(voxelHighlightMesh);
                 voxelCursor = new THREE.LineSegments(
                     new THREE.EdgesGeometry(new THREE.BoxGeometry(1, 1, 1.08)),
                     new THREE.LineBasicMaterial({ color: 0xffffff, depthTest: false }),
                 );
                 voxelCursor.visible = false;
-                voxelCursor.renderOrder = 11;
-                voxelRoot.add(voxelCursor);
+                voxelCursor.renderOrder = 13;
+                voxelViewRoot.add(voxelCursor);
+                for (let index = 0; index < 3; index++) {
+                    const cursor = new THREE.LineSegments(
+                        voxelCursor.geometry,
+                        new THREE.LineBasicMaterial({ color: 0xff00ff, depthTest: false }),
+                    );
+                    cursor.visible = false;
+                    cursor.renderOrder = 13;
+                    voxelMirrorCursors.push(cursor);
+                    voxelViewRoot.add(cursor);
+                }
+                voxelCrosshair = new THREE.LineSegments(
+                    new THREE.BufferGeometry().setAttribute("position", new THREE.Float32BufferAttribute([
+                        -0.42, 0, 0, -0.12, 0, 0,
+                        0.12, 0, 0, 0.42, 0, 0,
+                        0, -0.42, 0, 0, -0.12, 0,
+                        0, 0.12, 0, 0, 0.42, 0,
+                    ], 3)),
+                    new THREE.LineBasicMaterial({ color: 0xffffff, depthTest: false }),
+                );
+                voxelCrosshair.visible = false;
+                voxelCrosshair.renderOrder = 14;
+                voxelViewRoot.add(voxelCrosshair);
+                voxelSelection = new THREE.LineSegments(
+                    new THREE.BufferGeometry(),
+                    new THREE.ShaderMaterial({
+                        uniforms: { phase: { value: 0 } },
+                        vertexShader: `
+                            attribute float lineDistance;
+                            varying float distanceAlongLine;
+                            void main() {
+                                distanceAlongLine = lineDistance;
+                                gl_Position = projectionMatrix * modelViewMatrix * vec4(position, 1.0);
+                            }
+                        `,
+                        fragmentShader: `
+                            uniform float phase;
+                            varying float distanceAlongLine;
+                            void main() {
+                                float band = mod(distanceAlongLine + phase, 0.5);
+                                vec3 color = band < 0.25 ? vec3(1.0) : vec3(0.08, 0.09, 0.10);
+                                gl_FragColor = vec4(color, 1.0);
+                            }
+                        `,
+                        depthTest: false,
+                        toneMapped: false,
+                    }),
+                );
+                voxelSelection.visible = false;
+                voxelSelection.renderOrder = 12;
+                voxelViewRoot.add(voxelSelection);
                 voxelScene.add(new THREE.HemisphereLight(0xffffff, 0x667078, 2.2));
                 const light = new THREE.DirectionalLight(0xffffff, 2.8);
                 light.position.set(-35, 45, 80);
@@ -304,7 +418,11 @@ document.addEventListener("alpine:init", () => {
                 const resize = () => {
                     const size = canvas.getBoundingClientRect();
                     voxelRenderer.setSize(size.width, size.height, false);
-                    voxelCamera.aspect = size.width / size.height;
+                    const aspect = size.width / size.height;
+                    voxelCamera.left = -viewSize * aspect / 2;
+                    voxelCamera.right = viewSize * aspect / 2;
+                    voxelCamera.top = viewSize / 2;
+                    voxelCamera.bottom = -viewSize / 2;
                     voxelCamera.updateProjectionMatrix();
                     this.renderVoxelScene();
                 };
@@ -312,11 +430,177 @@ document.addEventListener("alpine:init", () => {
                 voxelResizeObserver.observe(canvas);
                 this.voxelReady = true;
                 resize();
+                this.initPreviewScene();
                 this.renderVoxels();
             },
 
             renderVoxelScene() {
                 if (voxelRenderer) voxelRenderer.render(voxelScene, voxelCamera);
+            },
+
+            initPreviewScene() {
+                const canvas = this.$refs.previewCanvas;
+                previewRenderer = new THREE.WebGLRenderer({ canvas, antialias: false, alpha: false, premultipliedAlpha: false, precision: "highp" });
+                previewRenderer.setPixelRatio(window.devicePixelRatio);
+                previewRenderer.outputColorSpace = THREE.SRGBColorSpace;
+                previewRenderer.toneMapping = THREE.NoToneMapping;
+                previewRenderer.getContext().disable(previewRenderer.getContext().DITHER);
+                previewScene = new THREE.Scene();
+                previewScene.background = new THREE.Color(0xffffff);
+                previewCamera = new THREE.OrthographicCamera(-50, 50, 50, -50, 0.1, 20000);
+                previewCamera.position.z = 10000;
+                previewRoot = new THREE.Group();
+                previewRoot.rotation.set(Math.PI / 6, -Math.PI / 4, 0);
+                previewModelRoot = new THREE.Group();
+                previewRoot.add(previewModelRoot);
+                previewScene.add(previewRoot);
+                const resize = () => {
+                    const size = canvas.getBoundingClientRect();
+                    previewRenderer.setSize(size.width, size.height, false);
+                    const aspect = size.width / size.height;
+                    previewCamera.left = -50 * aspect;
+                    previewCamera.right = 50 * aspect;
+                    previewCamera.top = 50;
+                    previewCamera.bottom = -50;
+                    previewCamera.updateProjectionMatrix();
+                    this.renderPreviewScene();
+                };
+                previewResizeObserver = new ResizeObserver(resize);
+                previewResizeObserver.observe(canvas);
+                resize();
+            },
+
+            renderPreviewScene() {
+                if (previewRenderer) previewRenderer.render(previewScene, previewCamera);
+            },
+
+            syncPreviewVoxels() {
+                if (!previewModelRoot) return;
+                const syncMesh = (source, key, targets) => {
+                    let target = targets.get(key);
+                    if (!target) {
+                        target = source.clone();
+                        targets.set(key, target);
+                        previewModelRoot.add(target);
+                    }
+                    target.visible = source.visible;
+                    target.count = source.count;
+                    target.instanceMatrix.array.set(source.instanceMatrix.array);
+                    target.instanceMatrix.needsUpdate = true;
+                    if (source.instanceColor) {
+                        if (!target.instanceColor) target.instanceColor = source.instanceColor.clone();
+                        else target.instanceColor.array.set(source.instanceColor.array);
+                        target.instanceColor.needsUpdate = true;
+                    }
+                };
+                for (const [id, mesh] of voxelLayerMeshes) syncMesh(mesh, id, previewLayerMeshes);
+                for (const [key, mesh] of voxelFaceMeshes) syncMesh(mesh, key, previewFaceMeshes);
+                previewModelRoot.position.z = -(this.layers.length ? Math.max(...this.layers.map(layerDepth)) : 1) / 2;
+                this.renderPreviewScene();
+            },
+
+            startPreviewRotation(event) {
+                if ((event.button !== 0 && event.button !== 1) || !previewRoot) return;
+                event.preventDefault();
+                event.currentTarget.setPointerCapture(event.pointerId);
+                previewRotation = {
+                    canvas: event.currentTarget,
+                    pointerId: event.pointerId,
+                    clientX: event.clientX,
+                    clientY: event.clientY,
+                    rotationX: previewRoot.rotation.x,
+                    rotationY: previewRoot.rotation.y,
+                };
+            },
+
+            continuePreviewRotation(event) {
+                if (event.pointerId !== previewRotation?.pointerId) return;
+                previewRoot.rotation.x = previewRotation.rotationX + (event.clientY - previewRotation.clientY) * 0.01;
+                previewRoot.rotation.y = previewRotation.rotationY + (event.clientX - previewRotation.clientX) * 0.01;
+                this.renderPreviewScene();
+            },
+
+            endPreviewRotation(event) {
+                if (event.pointerId !== previewRotation?.pointerId) return;
+                if (previewRotation.canvas.hasPointerCapture(event.pointerId)) previewRotation.canvas.releasePointerCapture(event.pointerId);
+                previewRotation = null;
+            },
+
+            setPreviewView(view) {
+                if (!previewRoot) return;
+                const rotations = {
+                    perspective: [Math.PI / 6, -Math.PI / 4],
+                    front: [0, 0],
+                    right: [0, -Math.PI / 2],
+                    top: [Math.PI / 2, 0],
+                };
+                const [x, y] = rotations[view] ?? rotations.perspective;
+                previewRoot.rotation.set(x, y, 0);
+                this.renderPreviewScene();
+            },
+
+            layerViewKey(id = this.activeLayerId, orientation = this.activeOrientation) {
+                return viewKey(orientation, id);
+            },
+
+            canvasFor(id = this.activeLayerId, orientation = this.activeOrientation) {
+                return canvases.get(this.layerViewKey(id, orientation));
+            },
+
+            markViewEdited(id = this.activeLayerId) {
+                if (this.activeOrientation !== "front") editedViews.add(this.layerViewKey(id));
+            },
+
+            syncDerivedOrientations() {
+                const ranges = layerDepthRanges(this.layers);
+                for (const layer of this.layers) for (const orientation of ORIENTATIONS.slice(1)) {
+                    const key = viewKey(orientation.id, layer.id);
+                    if (editedViews.has(key)) continue;
+                    const source = this.canvasFor(layer.id, "front").getContext("2d").getImageData(LAYER_PADDING, LAYER_PADDING, CANVAS_SIZE, CANVAS_SIZE);
+                    const target = this.canvasFor(layer.id, orientation.id).getContext("2d");
+                    const projection = target.createImageData(CANVAS_SIZE, CANVAS_SIZE, { colorSpace: "srgb" });
+                    const range = ranges.get(layer.id);
+                    const copy = (sourceOffset, x, y) => {
+                        if (x < 0 || x >= CANVAS_SIZE || y < 0 || y >= CANVAS_SIZE) return;
+                        const targetOffset = (y * CANVAS_SIZE + x) * 4;
+                        projection.data.set(source.data.subarray(sourceOffset, sourceOffset + 4), targetOffset);
+                    };
+                    if (orientation.id === "back") {
+                        for (let y = 0; y < CANVAS_SIZE; y++) for (let x = 0; x < CANVAS_SIZE; x++) {
+                            const offset = (y * CANVAS_SIZE + CANVAS_SIZE - 1 - x) * 4;
+                            if (source.data[offset + 3]) copy(offset, x, y);
+                        }
+                    } else if (orientation.id === "right" || orientation.id === "left") {
+                        for (let y = 0; y < CANVAS_SIZE; y++) {
+                            const start = orientation.id === "right" ? CANVAS_SIZE - 1 : 0;
+                            const step = orientation.id === "right" ? -1 : 1;
+                            let offset = -1;
+                            for (let x = start; x >= 0 && x < CANVAS_SIZE; x += step) {
+                                const candidate = (y * CANVAS_SIZE + x) * 4;
+                                if (source.data[candidate + 3]) { offset = candidate; break; }
+                            }
+                            for (let z = range.start; offset >= 0 && z < range.end; z++) {
+                                copy(offset, orientation.id === "right" ? 31 - z : 32 + z, y);
+                            }
+                        }
+                    } else {
+                        for (let x = 0; x < CANVAS_SIZE; x++) {
+                            const start = orientation.id === "top" ? 0 : CANVAS_SIZE - 1;
+                            const step = orientation.id === "top" ? 1 : -1;
+                            let offset = -1;
+                            for (let y = start; y >= 0 && y < CANVAS_SIZE; y += step) {
+                                const candidate = (y * CANVAS_SIZE + x) * 4;
+                                if (source.data[candidate + 3]) { offset = candidate; break; }
+                            }
+                            for (let z = range.start; offset >= 0 && z < range.end; z++) {
+                                copy(offset, x, orientation.id === "top" ? 32 + z : 31 - z);
+                            }
+                        }
+                    }
+                    target.clearRect(0, 0, LAYER_SIZE, LAYER_SIZE);
+                    target.putImageData(projection, LAYER_PADDING, LAYER_PADDING);
+                    quantizedPalettes.delete(key);
+                }
             },
 
             renderVoxels() {
@@ -325,7 +609,11 @@ document.addEventListener("alpine:init", () => {
                 const color = new THREE.Color();
                 const visibleLayers = this.layers.filter((layer) => layer.visible);
                 const visibleIds = new Set(visibleLayers.map((layer) => layer.id));
-                voxelGrid.position.z = visibleLayers.length + 0.01;
+                const visibleFaceKeys = new Set();
+                const modelDepth = this.layers.length ? Math.max(...this.layers.map(layerDepth)) : 1;
+                const ranges = layerDepthRanges(this.layers);
+                const editingSurface = this.activeOrientation === "front" ? modelDepth : this.activeOrientation === "back" ? 0 : CANVAS_SIZE / 2;
+                voxelGrid.position.z = editingSurface + visibleLayers.length * 0.001 + 0.01;
                 for (const [index, layer] of visibleLayers.entries()) {
                     let mesh = voxelLayerMeshes.get(layer.id);
                     if (!mesh) {
@@ -334,32 +622,134 @@ document.addEventListener("alpine:init", () => {
                         voxelLayerMeshes.set(layer.id, mesh);
                         voxelRoot.add(mesh);
                     }
-                    const pixels = canvases.get(layer.id).getContext("2d").getImageData(LAYER_PADDING, LAYER_PADDING, CANVAS_SIZE, CANVAS_SIZE).data;
-                    const depth = visibleLayers.length - index - 0.5;
+                    const pixels = this.canvasFor(layer.id, "front").getContext("2d").getImageData(LAYER_PADDING, LAYER_PADDING, CANVAS_SIZE, CANVAS_SIZE).data;
+                    const depth = layerDepth(layer);
+                    const range = ranges.get(layer.id);
+                    const offset = (visibleLayers.length - index) * 0.001;
+                    const left = new Int16Array(CANVAS_SIZE).fill(-1);
+                    const right = new Int16Array(CANVAS_SIZE).fill(-1);
+                    const top = new Int16Array(CANVAS_SIZE).fill(-1);
+                    const bottom = new Int16Array(CANVAS_SIZE).fill(-1);
                     let count = 0;
                     for (let y = 0; y < CANVAS_SIZE; y++) for (let x = 0; x < CANVAS_SIZE; x++) {
-                        const offset = (y * CANVAS_SIZE + x) * 4;
-                        if (!pixels[offset + 3]) continue;
-                        matrix.makeTranslation(x - 31.5, 31.5 - y, depth);
+                        const pixelOffset = (y * CANVAS_SIZE + x) * 4;
+                        if (!pixels[pixelOffset + 3]) continue;
+                        matrix.makeScale(1, 1, depth);
+                        matrix.setPosition(x - 31.5, 31.5 - y, range.start + depth / 2);
                         mesh.setMatrixAt(count, matrix);
-                        color.setStyle(`rgb(${pixels[offset]}, ${pixels[offset + 1]}, ${pixels[offset + 2]})`);
-                        mesh.setColorAt(count, color);
-                        count++;
+                        color.setRGB(pixels[pixelOffset] / 255, pixels[pixelOffset + 1] / 255, pixels[pixelOffset + 2] / 255, THREE.SRGBColorSpace);
+                        mesh.setColorAt(count++, color);
+                        if (left[y] < 0) left[y] = x;
+                        right[y] = x;
+                        if (top[x] < 0) top[x] = y;
+                        bottom[x] = y;
                     }
                     mesh.visible = true;
                     mesh.count = count;
                     mesh.instanceMatrix.needsUpdate = true;
                     if (mesh.instanceColor) mesh.instanceColor.needsUpdate = true;
                     mesh.computeBoundingSphere();
+                    for (const orientation of ORIENTATIONS) {
+                        const key = viewKey(orientation.id, layer.id);
+                        visibleFaceKeys.add(key);
+                        let face = voxelFaceMeshes.get(key);
+                        if (!face) {
+                            face = new THREE.InstancedMesh(voxelFaceGeometries.get(orientation.id), voxelMaterial, CANVAS_SIZE * CANVAS_SIZE);
+                            face.instanceMatrix.setUsage(THREE.DynamicDrawUsage);
+                            voxelFaceMeshes.set(key, face);
+                            voxelRoot.add(face);
+                        }
+                        const facePixels = this.canvasFor(layer.id, orientation.id).getContext("2d").getImageData(LAYER_PADDING, LAYER_PADDING, CANVAS_SIZE, CANVAS_SIZE).data;
+                        let faceCount = 0;
+                        for (let y = 0; y < CANVAS_SIZE; y++) for (let x = 0; x < CANVAS_SIZE; x++) {
+                            const pixelOffset = (y * CANVAS_SIZE + x) * 4;
+                            if (!facePixels[pixelOffset + 3]) continue;
+                            let position = null;
+                            if (orientation.id === "front" && pixels[pixelOffset + 3]) position = [x - 31.5, 31.5 - y, range.end + offset + 0.002];
+                            if (orientation.id === "back" && pixels[(y * CANVAS_SIZE + CANVAS_SIZE - 1 - x) * 4 + 3]) position = [31.5 - x, 31.5 - y, range.start - offset - 0.002];
+                            if (orientation.id === "right") {
+                                const z = 31 - x;
+                                if (right[y] >= 0 && containsDepthZ(range, z)) position = [right[y] - 31.5 + 0.502 + offset, 31.5 - y, z + 0.5];
+                            }
+                            if (orientation.id === "left") {
+                                const z = x - 32;
+                                if (left[y] >= 0 && containsDepthZ(range, z)) position = [left[y] - 31.5 - 0.502 - offset, 31.5 - y, z + 0.5];
+                            }
+                            if (orientation.id === "top") {
+                                const z = y - 32;
+                                if (top[x] >= 0 && containsDepthZ(range, z)) position = [x - 31.5, 31.5 - top[x] + 0.502 + offset, z + 0.5];
+                            }
+                            if (orientation.id === "bottom") {
+                                const z = 31 - y;
+                                if (bottom[x] >= 0 && containsDepthZ(range, z)) position = [x - 31.5, 31.5 - bottom[x] - 0.502 - offset, z + 0.5];
+                            }
+                            if (!position) continue;
+                            matrix.makeTranslation(...position);
+                            face.setMatrixAt(faceCount, matrix);
+                            color.setRGB(facePixels[pixelOffset] / 255, facePixels[pixelOffset + 1] / 255, facePixels[pixelOffset + 2] / 255, THREE.SRGBColorSpace);
+                            face.setColorAt(faceCount++, color);
+                        }
+                        face.count = faceCount;
+                        face.visible = faceCount > 0;
+                        face.instanceMatrix.needsUpdate = true;
+                        if (face.instanceColor) face.instanceColor.needsUpdate = true;
+                        face.computeBoundingSphere();
+                    }
                 }
                 for (const [id, mesh] of voxelLayerMeshes) if (!visibleIds.has(id)) mesh.visible = false;
+                for (const [key, mesh] of voxelFaceMeshes) if (!visibleFaceKeys.has(key)) mesh.visible = false;
+                this.syncPreviewVoxels();
+                this.renderVoxelSelection();
                 this.renderVoxelScene();
             },
 
             voxelLayerDepth(id = this.activeLayerId) {
                 const visibleLayers = this.layers.filter((layer) => layer.visible);
                 const index = visibleLayers.findIndex((layer) => layer.id === id);
-                return index < 0 ? 0.5 : visibleLayers.length - index - 0.5;
+                if (index < 0) return 0.5;
+                const range = layerDepthRanges(this.layers).get(id);
+                const surface = this.activeOrientation === "front"
+                    ? range.end - 0.5
+                    : this.activeOrientation === "back" ? range.start - 0.5 : CANVAS_SIZE / 2 - 0.5;
+                return surface + (visibleLayers.length - index) * 0.001;
+            },
+
+            renderVoxelSelection() {
+                if (!voxelSelection) return;
+                const positions = [];
+                const distances = [];
+                const selected = (x, y) => x >= 0 && x < CANVAS_SIZE && y >= 0 && y < CANVAS_SIZE && selectionMask?.[maskIndex(x, y)];
+                const addEdge = (x1, y1, x2, y2) => {
+                    positions.push(x1 - 32, 32 - y1, 0, x2 - 32, 32 - y2, 0);
+                    distances.push(0, Math.hypot(x2 - x1, y2 - y1));
+                };
+                for (let y = 0; y < CANVAS_SIZE; y++) for (let x = 0; x < CANVAS_SIZE; x++) {
+                    if (!selected(x, y)) continue;
+                    if (!selected(x, y - 1)) addEdge(x, y, x + 1, y);
+                    if (!selected(x + 1, y)) addEdge(x + 1, y, x + 1, y + 1);
+                    if (!selected(x, y + 1)) addEdge(x + 1, y + 1, x, y + 1);
+                    if (!selected(x - 1, y)) addEdge(x, y + 1, x, y);
+                }
+                voxelSelection.geometry.setAttribute("position", new THREE.Float32BufferAttribute(positions, 3));
+                voxelSelection.geometry.setAttribute("lineDistance", new THREE.Float32BufferAttribute(distances, 1));
+                voxelSelection.geometry.computeBoundingSphere();
+                voxelSelection.position.z = this.voxelLayerDepth() + 0.52;
+                voxelSelection.visible = positions.length > 0;
+                if (voxelSelection.visible && !voxelSelectionFrame) this.animateVoxelSelection();
+                this.renderVoxelScene();
+            },
+
+            animateVoxelSelection() {
+                const animate = (time) => {
+                    if (!voxelSelection?.visible) {
+                        voxelSelectionFrame = null;
+                        return;
+                    }
+                    voxelSelection.material.uniforms.phase.value = time * 0.002;
+                    this.renderVoxelScene();
+                    voxelSelectionFrame = requestAnimationFrame(animate);
+                };
+                voxelSelectionFrame = requestAnimationFrame(animate);
             },
 
             refreshUI() {
@@ -370,10 +760,12 @@ document.addEventListener("alpine:init", () => {
             },
 
             render() {
+                this.syncDerivedOrientations();
+                for (const layer of this.layers) for (const orientation of ORIENTATIONS) this.normalizeLayerColors(layer.id, orientation.id);
                 this.context.clearRect(0, 0, CANVAS_SIZE, CANVAS_SIZE);
                 for (const layer of [...this.layers].reverse()) {
                     if (layer.visible) this.context.drawImage(
-                        canvases.get(layer.id),
+                        this.canvasFor(layer.id),
                         LAYER_PADDING,
                         LAYER_PADDING,
                         CANVAS_SIZE,
@@ -390,25 +782,85 @@ document.addEventListener("alpine:init", () => {
                 this.renderVoxels();
             },
 
+            normalizeLayerColors(id, orientation = this.activeOrientation) {
+                const key = this.layerViewKey(id, orientation);
+                const cached = quantizedPalettes.get(key);
+                if (!cached?.confirmed || quantizationSource?.key === key) return;
+                const context = this.canvasFor(id, orientation).getContext("2d", CANVAS_CONTEXT_OPTIONS);
+                const image = context.getImageData(LAYER_PADDING, LAYER_PADDING, CANVAS_SIZE, CANVAS_SIZE);
+                let changed = false;
+                for (let offset = 0; offset < image.data.length; offset += 4) {
+                    if (!image.data[offset + 3]) continue;
+                    const color = this.palettePixelColor(image.data, offset, cached);
+                    const current = `#${image.data[offset].toString(16).padStart(2, "0")}${image.data[offset + 1].toString(16).padStart(2, "0")}${image.data[offset + 2].toString(16).padStart(2, "0")}`;
+                    if (color === current) continue;
+                    [image.data[offset], image.data[offset + 1], image.data[offset + 2]] = hexColor(color);
+                    changed = true;
+                }
+                if (changed) context.putImageData(image, LAYER_PADDING, LAYER_PADDING);
+            },
+
+            perspectiveMask(id = this.activeLayerId, orientation = this.activeOrientation) {
+                const mask = new Uint8Array(CANVAS_SIZE * CANVAS_SIZE);
+                const front = this.canvasFor(id, "front").getContext("2d").getImageData(LAYER_PADDING, LAYER_PADDING, CANVAS_SIZE, CANVAS_SIZE).data;
+                const layer = this.layers.find((candidate) => candidate.id === id);
+                const range = layerDepthRanges(this.layers).get(layer.id);
+                const rowHasPixels = new Uint8Array(CANVAS_SIZE);
+                const columnHasPixels = new Uint8Array(CANVAS_SIZE);
+                for (let y = 0; y < CANVAS_SIZE; y++) for (let x = 0; x < CANVAS_SIZE; x++) if (front[(y * CANVAS_SIZE + x) * 4 + 3]) {
+                    rowHasPixels[y] = 1;
+                    columnHasPixels[x] = 1;
+                }
+                for (let y = 0; y < CANVAS_SIZE; y++) for (let x = 0; x < CANVAS_SIZE; x++) {
+                    if (orientation === "front") mask[y * CANVAS_SIZE + x] = front[(y * CANVAS_SIZE + x) * 4 + 3] > 0;
+                    else if (orientation === "back") mask[y * CANVAS_SIZE + x] = front[(y * CANVAS_SIZE + CANVAS_SIZE - 1 - x) * 4 + 3] > 0;
+                    else if (orientation === "right") mask[y * CANVAS_SIZE + x] = rowHasPixels[y] && containsDepthZ(range, 31 - x);
+                    else if (orientation === "left") mask[y * CANVAS_SIZE + x] = rowHasPixels[y] && containsDepthZ(range, x - 32);
+                    else {
+                        const z = orientation === "top" ? y - 32 : 31 - y;
+                        mask[y * CANVAS_SIZE + x] = columnHasPixels[x] && containsDepthZ(range, z);
+                    }
+                }
+                return mask;
+            },
+
+            canonicalPixelColor(pixels, offset) {
+                const exact = `#${pixels[offset].toString(16).padStart(2, "0")}${pixels[offset + 1].toString(16).padStart(2, "0")}${pixels[offset + 2].toString(16).padStart(2, "0")}`;
+                const activeKey = this.layerViewKey();
+                const activePalette = quantizedPalettes.get(activeKey);
+                const frontPalette = quantizedPalettes.get(this.layerViewKey(this.activeLayerId, "front"));
+                const canonical = this.activeOrientation !== "front" && !editedViews.has(activeKey)
+                    ? frontPalette
+                    : frontPalette?.confirmed ? frontPalette : activePalette;
+                return canonical?.colors.length && !activePalette?.allowed.has(exact)
+                    ? this.palettePixelColor(pixels, offset, canonical)
+                    : exact;
+            },
+
             updatePalette(maxColors = 64, image = null) {
-                const canvas = canvases.get(this.activeLayerId);
+                const key = this.layerViewKey();
+                const canvas = this.canvasFor();
                 if (!canvas) return 0;
                 const source = image ?? canvas.getContext("2d").getImageData(LAYER_PADDING, LAYER_PADDING, CANVAS_SIZE, CANVAS_SIZE);
                 const pixels = source.data;
-                const cached = image ? null : quantizedPalettes.get(this.activeLayerId);
+                const visible = this.perspectiveMask();
                 const colors = new Map();
                 const start = image ? LAYER_PADDING : 0;
                 const end = start + CANVAS_SIZE;
                 for (let y = start; y < end; y++) for (let x = start; x < end; x++) {
                     const offset = (y * source.width + x) * 4;
-                    if (!pixels[offset + 3]) continue;
-                    const color = this.palettePixelColor(pixels, offset, cached);
+                    if (!visible[(y - start) * CANVAS_SIZE + x - start] || !pixels[offset + 3]) continue;
+                    const color = image
+                        ? `#${pixels[offset].toString(16).padStart(2, "0")}${pixels[offset + 1].toString(16).padStart(2, "0")}${pixels[offset + 2].toString(16).padStart(2, "0")}`
+                        : this.canonicalPixelColor(pixels, offset);
                     colors.set(color, (colors.get(color) ?? 0) + 1);
                 }
-                const palette = [...colors]
+                const ranked = [...colors]
                     .sort((a, b) => b[1] - a[1])
-                    .slice(0, maxColors)
                     .map(([color]) => color);
+                const previous = paletteOrders.get(key) ?? [];
+                const palette = [...previous.filter((color) => colors.has(color)), ...ranked.filter((color) => !previous.includes(color))].slice(0, maxColors);
+                paletteOrders.set(key, palette);
                 if (palette.join() !== this.palette.join()) this.palette = palette;
                 return colors.size;
             },
@@ -426,14 +878,25 @@ document.addEventListener("alpine:init", () => {
                 return cached.palette[nearest];
             },
 
+            matchesPalettePixel(pixels, offset, target, tolerance, cached) {
+                if (target[3] === 0) return pixels[offset + 3] <= tolerance;
+                if (!pixels[offset + 3]) return false;
+                const color = hexColor(this.palettePixelColor(pixels, offset, cached));
+                const red = color[0] - target[0];
+                const green = color[1] - target[1];
+                const blue = color[2] - target[2];
+                return Math.sqrt((red * red + green * green + blue * blue) / 3) <= tolerance;
+            },
+
             highlightPaletteColor(color) {
                 const pixels = this.activeContext().getImageData(LAYER_PADDING, LAYER_PADDING, CANVAS_SIZE, CANVAS_SIZE).data;
-                const cached = quantizedPalettes.get(this.activeLayerId);
+                const visible = this.perspectiveMask();
                 const canvas = this.$refs.paletteHighlight;
                 const context = canvas.getContext("2d");
                 const highlight = context.createImageData(CANVAS_SIZE, CANVAS_SIZE);
                 for (let offset = 0; offset < pixels.length; offset += 4) {
-                    if (!pixels[offset + 3] || this.palettePixelColor(pixels, offset, cached) !== color) continue;
+                    const pixelColor = this.canonicalPixelColor(pixels, offset);
+                    if (!visible[offset / 4] || !pixels[offset + 3] || pixelColor !== color) continue;
                     highlight.data[offset] = highlight.data[offset + 1] = highlight.data[offset + 2] = highlight.data[offset + 3] = 255;
                 }
                 if (this.pulseVoxelHighlight(highlight.data)) return;
@@ -476,16 +939,68 @@ document.addEventListener("alpine:init", () => {
             },
 
             allowPaletteColor(color = this.color) {
-                const cached = quantizedPalettes.get(this.activeLayerId);
-                if (!cached || cached.allowed.has(color)) return;
+                const canonical = quantizedPalettes.get(this.layerViewKey(this.activeLayerId, "front"));
+                if (canonical?.confirmed && !canonical.allowed.has(color)) {
+                    const source = hexColor(color);
+                    const nearest = canonical.colors.reduce((best, candidate, index) => {
+                        const distance = (source[0] - candidate[0]) ** 2 + (source[1] - candidate[1]) ** 2 + (source[2] - candidate[2]) ** 2;
+                        return distance < best.distance ? { index, distance } : best;
+                    }, { index: 0, distance: Infinity });
+                    if (canonical.locked || nearest.distance <= 432) color = this.color = canonical.palette[nearest.index];
+                }
+                const key = this.layerViewKey();
+                let cached = quantizedPalettes.get(key);
+                if (!cached) {
+                    const palette = [...this.palette];
+                    cached = { palette, colors: palette.map(hexColor), allowed: new Set(palette) };
+                    quantizedPalettes.set(key, cached);
+                }
+                if (cached.allowed.has(color)) return;
                 cached.palette.push(color);
                 cached.colors.push(hexColor(color));
                 cached.allowed.add(color);
             },
 
+            async importPaletteFile(file) {
+                if (!file) return;
+                const lines = (await file.text()).split(/\r?\n/);
+                if (lines[0]?.replace(/^\uFEFF/, "").trim() !== "GIMP Palette") return;
+                const palette = [...new Set(lines.flatMap((line) => {
+                    const match = line.match(/^\s*(\d{1,3})\s+(\d{1,3})\s+(\d{1,3})(?:\s|$)/);
+                    if (!match) return [];
+                    const channels = match.slice(1, 4).map((value) => Math.max(0, Math.min(255, Number(value))));
+                    return [`#${channels.map((value) => value.toString(16).padStart(2, "0")).join("")}`];
+                }))].slice(0, 64);
+                if (!palette.length) return;
+                this.confirmQuantization();
+                const colors = palette.map(hexColor);
+                for (const layer of this.layers) for (const orientation of ORIENTATIONS) {
+                    const key = viewKey(orientation.id, layer.id);
+                    const context = this.canvasFor(layer.id, orientation.id).getContext("2d", CANVAS_CONTEXT_OPTIONS);
+                    const image = context.getImageData(LAYER_PADDING, LAYER_PADDING, CANVAS_SIZE, CANVAS_SIZE);
+                    for (let offset = 0; offset < image.data.length; offset += 4) {
+                        if (!image.data[offset + 3]) continue;
+                        const nearest = colors.reduce((best, candidate, index) => {
+                            const distance = (image.data[offset] - candidate[0]) ** 2 + (image.data[offset + 1] - candidate[1]) ** 2 + (image.data[offset + 2] - candidate[2]) ** 2;
+                            return distance < best.distance ? { index, distance } : best;
+                        }, { index: 0, distance: Infinity }).index;
+                        [image.data[offset], image.data[offset + 1], image.data[offset + 2]] = colors[nearest];
+                    }
+                    context.putImageData(image, LAYER_PADDING, LAYER_PADDING);
+                    quantizedPalettes.set(key, { palette: [...palette], colors: palette.map(hexColor), allowed: new Set(palette), confirmed: true, locked: true });
+                    paletteOrders.set(key, [...palette]);
+                }
+                this.history = [];
+                this.future = [];
+                this.render();
+                this.refreshUI();
+            },
+
             beginQuantization() {
-                if (quantizationSource?.id === this.activeLayerId) return;
+                const key = this.layerViewKey();
+                if (quantizationSource?.key === key) return;
                 quantizationSource = {
+                    key,
                     id: this.activeLayerId,
                     pixels: this.activeContext().getImageData(0, 0, LAYER_SIZE, LAYER_SIZE),
                     recorded: false,
@@ -494,11 +1009,12 @@ document.addEventListener("alpine:init", () => {
 
             quantizeActiveLayer(value) {
                 this.quantization = Math.max(1, Math.min(64, Number(value) || 1));
-                if (!quantizationSource || quantizationSource.id !== this.activeLayerId) this.beginQuantization();
+                if (quantizationSource?.key !== this.layerViewKey()) this.beginQuantization();
                 if (!quantizationSource.recorded) {
                     this.pushHistory(false);
                     quantizationSource.recorded = true;
                 }
+                this.markViewEdited();
                 quantizationSource.result = quantizeImage(quantizationSource.pixels, this.quantization);
                 this.activeContext().putImageData(quantizationSource.result, 0, 0);
                 this.quantizationPending = true;
@@ -508,13 +1024,13 @@ document.addEventListener("alpine:init", () => {
             confirmQuantization() {
                 const confirmedLimit = this.quantizationPending ? this.quantization : 64;
                 const result = quantizationSource?.result;
-                const layerId = quantizationSource?.id;
+                const key = quantizationSource?.key;
                 quantizationSource = null;
                 this.quantizationPending = false;
                 this.syncQuantizationLimit(Math.min(confirmedLimit, this.updatePalette(confirmedLimit, result)));
-                if (result && layerId) {
+                if (result && key) {
                     const palette = [...this.palette];
-                    quantizedPalettes.set(layerId, { palette, colors: palette.map(hexColor), allowed: new Set(palette) });
+                    quantizedPalettes.set(key, { palette, colors: palette.map(hexColor), allowed: new Set(palette), confirmed: true });
                     this.history = [];
                     this.future = [];
                 }
@@ -522,7 +1038,7 @@ document.addEventListener("alpine:init", () => {
 
             renderThumbnails() {
                 for (const thumbnail of this.$root.querySelectorAll("[data-layer-thumbnail]")) {
-                    const source = canvases.get(thumbnail.dataset.layerThumbnail);
+                    const source = this.canvasFor(thumbnail.dataset.layerThumbnail);
                     const context = thumbnail.getContext("2d");
                     context.clearRect(0, 0, CANVAS_SIZE, CANVAS_SIZE);
                     if (source) context.drawImage(
@@ -541,8 +1057,8 @@ document.addEventListener("alpine:init", () => {
 
             createLayer(name) {
                 const id = `layer-${++nextLayerId}`;
-                canvases.set(id, createLayerCanvas());
-                return { id, name: name || `Layer ${nextLayerId}`, visible: true };
+                for (const orientation of ORIENTATIONS) canvases.set(viewKey(orientation.id, id), createLayerCanvas());
+                return { id, name: name || `Layer ${nextLayerId}`, visible: true, depth: layerDepth(this.layers[0]), offset: 0 };
             },
 
             addLayer(name, record = true) {
@@ -561,13 +1077,23 @@ document.addEventListener("alpine:init", () => {
                 this.pushHistory();
                 const copy = this.createLayer(`${source.name} copy`);
                 copy.visible = source.visible;
-                canvases.get(copy.id).getContext("2d").drawImage(canvases.get(source.id), 0, 0);
-                if (quantizedPalettes.has(source.id)) {
-                    const palette = [...quantizedPalettes.get(source.id).palette];
-                    quantizedPalettes.set(copy.id, { palette, colors: palette.map(hexColor), allowed: new Set(palette) });
+                copy.depth = layerDepth(source);
+                copy.offset = source.offset;
+                for (const orientation of ORIENTATIONS) {
+                    const sourceKey = viewKey(orientation.id, source.id);
+                    const copyKey = viewKey(orientation.id, copy.id);
+                    canvases.get(copyKey).getContext("2d").drawImage(canvases.get(sourceKey), 0, 0);
+                    if (quantizedPalettes.has(sourceKey)) {
+                        const sourcePalette = quantizedPalettes.get(sourceKey);
+                        const palette = [...sourcePalette.palette];
+                        quantizedPalettes.set(copyKey, { palette, colors: palette.map(hexColor), allowed: new Set(palette), confirmed: sourcePalette.confirmed, locked: sourcePalette.locked });
+                    }
+                    if (paletteOrders.has(sourceKey)) paletteOrders.set(copyKey, [...paletteOrders.get(sourceKey)]);
+                    if (editedViews.has(sourceKey)) editedViews.add(copyKey);
                 }
                 const index = this.layers.findIndex((layer) => layer.id === source.id);
                 this.layers.splice(index, 0, copy);
+                this.normalizeLayerOffsets();
                 this.activeLayerId = copy.id;
                 this.render();
                 this.refreshUI();
@@ -577,8 +1103,15 @@ document.addEventListener("alpine:init", () => {
                 if (this.layers.length === 1) return;
                 this.pushHistory();
                 const index = this.layers.findIndex((layer) => layer.id === this.activeLayerId);
-                canvases.delete(this.activeLayerId);
+                for (const orientation of ORIENTATIONS) {
+                    const key = viewKey(orientation.id, this.activeLayerId);
+                    canvases.delete(key);
+                    quantizedPalettes.delete(key);
+                    paletteOrders.delete(key);
+                    editedViews.delete(key);
+                }
                 this.layers.splice(index, 1);
+                this.normalizeLayerOffsets();
                 this.activeLayerId = this.layers[Math.min(index, this.layers.length - 1)].id;
                 this.render();
             },
@@ -586,6 +1119,43 @@ document.addEventListener("alpine:init", () => {
             toggleLayer(layer) {
                 this.pushHistory();
                 layer.visible = !layer.visible;
+                this.render();
+            },
+
+            setLayerDepth(layer, input) {
+                const index = this.layers.indexOf(layer);
+                const previousDepth = layerDepth(this.layers[index + 1]);
+                const depth = Math.max(Math.floor(Number(input.value) || 1), previousDepth);
+                input.value = depth;
+                if (layerDepth(layer) === depth && this.layers.every((candidate, index) => !index || layerDepth(this.layers[index - 1]) >= layerDepth(candidate))) return;
+                this.pushHistory();
+                layer.depth = depth;
+                this.normalizeLayerDepths();
+                this.normalizeLayerOffsets();
+                this.render();
+            },
+
+            normalizeLayerDepths() {
+                for (let index = this.layers.length - 2; index >= 0; index--) {
+                    this.layers[index].depth = Math.max(layerDepth(this.layers[index]), layerDepth(this.layers[index + 1]));
+                }
+            },
+
+            normalizeLayerOffsets() {
+                for (let index = 0; index < this.layers.length; index++) {
+                    const max = index ? layerDepth(this.layers[index - 1]) - layerDepth(this.layers[index]) : 0;
+                    this.layers[index].offset = layerOffset(this.layers[index], max);
+                }
+            },
+
+            setLayerOffset(layer, input) {
+                const index = this.layers.indexOf(layer);
+                const max = index ? layerDepth(this.layers[index - 1]) - layerDepth(layer) : 0;
+                const offset = layerOffset({ offset: input.value }, max);
+                input.value = offset;
+                if (layerOffset(layer, max) === offset) return;
+                this.pushHistory();
+                layer.offset = offset;
                 this.render();
             },
 
@@ -614,6 +1184,8 @@ document.addEventListener("alpine:init", () => {
                 }
                 const [layer] = this.layers.splice(from, 1);
                 this.layers.splice(to, 0, layer);
+                this.normalizeLayerDepths();
+                this.normalizeLayerOffsets();
                 this.render();
             },
 
@@ -622,20 +1194,37 @@ document.addEventListener("alpine:init", () => {
                 this.layerDragChanged = false;
             },
 
+            orientationRotation(id = this.activeOrientation) {
+                return ORIENTATIONS.find((orientation) => orientation.id === id) ?? ORIENTATIONS[0];
+            },
+
+            switchOrientation(id) {
+                if (id === this.activeOrientation) return;
+                this.confirmQuantization();
+                this.activeOrientation = id;
+                const target = this.orientationRotation();
+                if (voxelViewRoot) voxelViewRoot.rotation.set(-target.x, -target.y, 0);
+                this.clearSelection();
+                this.clearHover();
+                this.render();
+                this.refreshUI();
+                this.snapVoxelRotation();
+            },
+
             voxelPointFromEvent(event) {
-                if (!voxelRaycaster || !voxelRoot) return null;
+                if (!voxelRaycaster || !voxelViewRoot) return null;
                 const rect = this.$refs.voxelCanvas.getBoundingClientRect();
                 const pointer = new THREE.Vector2(
                     (event.clientX - rect.left) / rect.width * 2 - 1,
                     -(event.clientY - rect.top) / rect.height * 2 + 1,
                 );
-                voxelRoot.updateMatrixWorld(true);
+                voxelViewRoot.updateMatrixWorld(true);
                 voxelRaycaster.setFromCamera(pointer, voxelCamera);
-                const normal = new THREE.Vector3(0, 0, 1).applyQuaternion(voxelRoot.getWorldQuaternion(new THREE.Quaternion()));
-                const planePoint = voxelRoot.localToWorld(new THREE.Vector3(0, 0, this.voxelLayerDepth() + 0.5));
+                const normal = new THREE.Vector3(0, 0, 1).applyQuaternion(voxelViewRoot.getWorldQuaternion(new THREE.Quaternion()));
+                const planePoint = voxelViewRoot.localToWorld(new THREE.Vector3(0, 0, this.voxelLayerDepth() + 0.5));
                 const hit = voxelRaycaster.ray.intersectPlane(new THREE.Plane().setFromNormalAndCoplanarPoint(normal, planePoint), new THREE.Vector3());
                 if (!hit) return null;
-                voxelRoot.worldToLocal(hit);
+                voxelViewRoot.worldToLocal(hit);
                 return { x: hit.x + CANVAS_SIZE / 2, y: CANVAS_SIZE / 2 - hit.y };
             },
 
@@ -667,16 +1256,41 @@ document.addEventListener("alpine:init", () => {
                 this.selection = maskBounds(mask);
                 this.selectionPath = this.selection ? maskPath(mask) : "";
                 if (!this.selection) selectionMask = null;
+                if (this.selection && (selectionAnchor || moveState)) this.updateSelectionGuides(this.selection, 0, 0);
+                this.renderVoxelSelection();
             },
 
             clearSelection() {
                 selectionMask = null;
                 this.selection = null;
                 this.selectionPath = "";
+                this.clearCenterGuides();
+                this.renderVoxelSelection();
+            },
+
+            clearCenterGuides() {
+                this.centerGuideX = false;
+                this.centerGuideY = false;
+            },
+
+            updateCenterGuides(point) {
+                this.centerGuideX = Math.abs(point.x - CANVAS_SIZE / 2) <= 1;
+                this.centerGuideY = Math.abs(point.y - CANVAS_SIZE / 2) <= 1;
+                return point;
+            },
+
+            updateSelectionGuides(selection, dx, dy) {
+                const left = selection.x + dx;
+                const top = selection.y + dy;
+                const horizontalPoints = [left, left + selection.width / 2, left + selection.width];
+                const verticalPoints = [top, top + selection.height / 2, top + selection.height];
+                this.centerGuideX = horizontalPoints.some((point) => Math.abs(point - CANVAS_SIZE / 2) <= 1);
+                this.centerGuideY = verticalPoints.some((point) => Math.abs(point - CANVAS_SIZE / 2) <= 1);
+                return { dx, dy };
             },
 
             selectLayerPixels(id = this.activeLayerId) {
-                const canvas = canvases.get(id);
+                const canvas = this.canvasFor(id);
                 if (!canvas) return;
                 const pixels = canvas.getContext("2d").getImageData(0, 0, LAYER_SIZE, LAYER_SIZE).data;
                 let minX = LAYER_SIZE;
@@ -738,20 +1352,50 @@ document.addEventListener("alpine:init", () => {
             renderVoxelCursor() {
                 if (!voxelCursor) return;
                 voxelCursor.visible = !!this.hoverPoint;
+                voxelCrosshair.visible = !!this.hoverPoint;
+                for (const cursor of voxelMirrorCursors) cursor.visible = false;
                 if (this.hoverPoint) {
                     const size = this.tool === "pencil" || this.tool === "eraser"
                         ? Math.max(1, Math.min(16, Number(this.brushSize) || 1))
                         : 1;
                     const startX = Math.floor(this.hoverPoint.x) - Math.floor((size - 1) / 2);
                     const startY = Math.floor(this.hoverPoint.y) - Math.floor((size - 1) / 2);
+                    const x = Math.max(0, Math.min(CANVAS_SIZE - 1, Math.floor(this.hoverPoint.x)));
+                    const y = Math.max(0, Math.min(CANVAS_SIZE - 1, Math.floor(this.hoverPoint.y)));
+                    const pixel = this.context.getImageData(x, y, 1, 1).data;
+                    const luminance = pixel[3] ? (pixel[0] * 0.2126 + pixel[1] * 0.7152 + pixel[2] * 0.0722) / 255 : 1;
+                    const cursorColor = luminance > 0.5 ? 0x111315 : 0xffffff;
+                    voxelCursor.material.color.set(cursorColor);
+                    voxelCrosshair.material.color.set(cursorColor);
                     voxelCursor.position.set(startX + (size - 1) / 2 - 31.5, 31.5 - startY - (size - 1) / 2, this.voxelLayerDepth() + 0.04);
                     voxelCursor.scale.set(size, size, 1);
+                    voxelCrosshair.position.set(this.hoverPoint.x - 32, 32 - this.hoverPoint.y, this.voxelLayerDepth() + 0.56);
+                    if (this.tool === "pencil" || this.tool === "eraser") {
+                        const [verticalCursor, horizontalCursor, combinedCursor] = voxelMirrorCursors;
+                        const position = voxelCursor.position;
+                        if (this.verticalSymmetry) {
+                            verticalCursor.visible = true;
+                            verticalCursor.position.set(-position.x, position.y, position.z);
+                            verticalCursor.scale.copy(voxelCursor.scale);
+                        }
+                        if (this.horizontalSymmetry) {
+                            horizontalCursor.visible = true;
+                            horizontalCursor.position.set(position.x, -position.y, position.z);
+                            horizontalCursor.scale.copy(voxelCursor.scale);
+                        }
+                        if (this.verticalSymmetry && this.horizontalSymmetry) {
+                            combinedCursor.visible = true;
+                            combinedCursor.position.set(-position.x, -position.y, position.z);
+                            combinedCursor.scale.copy(voxelCursor.scale);
+                        }
+                    }
                 }
                 this.renderVoxelScene();
             },
 
             clearHover() {
                 this.hoverPoint = null;
+                this.clearCenterGuides();
                 this.renderVoxelCursor();
             },
 
@@ -760,19 +1404,24 @@ document.addEventListener("alpine:init", () => {
                     this.clearHover();
                     return;
                 }
+                const showGuides = this.tool === "pencil" || this.tool === "eraser" || (this.tool === "selection" && !selectionAnchor);
                 const voxelPoint = this.voxelPointFromEvent(event);
                 if (voxelPoint) {
-                    this.hoverPoint = voxelPoint.x >= 0 && voxelPoint.x < CANVAS_SIZE && voxelPoint.y >= 0 && voxelPoint.y < CANVAS_SIZE ? voxelPoint : null;
+                    const inside = voxelPoint.x >= 0 && voxelPoint.x < CANVAS_SIZE && voxelPoint.y >= 0 && voxelPoint.y < CANVAS_SIZE;
+                    this.hoverPoint = inside && showGuides ? this.updateCenterGuides(voxelPoint) : inside ? voxelPoint : null;
+                    if (!this.hoverPoint || !showGuides) if (!selectionAnchor && !moveState) this.clearCenterGuides();
                     this.renderVoxelCursor();
                     return;
                 }
                 const rect = this.$refs.canvas.getBoundingClientRect();
                 const inside = event.clientX >= rect.left && event.clientX < rect.right
                     && event.clientY >= rect.top && event.clientY < rect.bottom;
-                this.hoverPoint = inside ? {
+                const hoverPoint = inside ? {
                     x: (event.clientX - rect.left) * CANVAS_SIZE / rect.width,
                     y: (event.clientY - rect.top) * CANVAS_SIZE / rect.height,
                 } : null;
+                this.hoverPoint = hoverPoint && showGuides ? this.updateCenterGuides(hoverPoint) : hoverPoint;
+                if (!this.hoverPoint || !showGuides) if (!selectionAnchor && !moveState) this.clearCenterGuides();
                 this.renderVoxelCursor();
             },
 
@@ -783,6 +1432,7 @@ document.addEventListener("alpine:init", () => {
             startVoxelRotation(event) {
                 if (!voxelRoot) return;
                 event.preventDefault();
+                this.clearSelection();
                 cancelAnimationFrame(voxelSnapFrame);
                 voxelSnapFrame = null;
                 voxelRotation = {
@@ -792,7 +1442,6 @@ document.addEventListener("alpine:init", () => {
                     rotationX: voxelRoot.rotation.x,
                     rotationY: voxelRoot.rotation.y,
                 };
-                voxelBackdrop.visible = false;
                 voxelGrid.visible = false;
                 this.capturePointer(event);
                 this.clearHover();
@@ -800,7 +1449,7 @@ document.addEventListener("alpine:init", () => {
 
             continueVoxelRotation(event) {
                 if (event.pointerId !== voxelRotation?.pointerId) return;
-                voxelRoot.rotation.x = Math.max(-1.35, Math.min(1.35, voxelRotation.rotationX + (event.clientY - voxelRotation.clientY) * 0.01));
+                voxelRoot.rotation.x = voxelRotation.rotationX + (event.clientY - voxelRotation.clientY) * 0.01;
                 voxelRoot.rotation.y = voxelRotation.rotationY + (event.clientX - voxelRotation.clientX) * 0.01;
                 this.renderVoxelScene();
             },
@@ -808,18 +1457,25 @@ document.addEventListener("alpine:init", () => {
             endVoxelRotation(event) {
                 if (event.pointerId !== voxelRotation?.pointerId) return;
                 voxelRotation = null;
-                const rotationX = voxelRoot.rotation.x;
-                const rotationY = ((voxelRoot.rotation.y + Math.PI) % (Math.PI * 2) + Math.PI * 2) % (Math.PI * 2) - Math.PI;
-                voxelRoot.rotation.y = rotationY;
+                this.snapVoxelRotation();
+            },
+
+            snapVoxelRotation() {
+                if (!voxelRoot) return;
+                cancelAnimationFrame(voxelSnapFrame);
+                const target = this.orientationRotation();
+                const startRotation = voxelRoot.quaternion.clone();
+                const targetRotation = new THREE.Quaternion().setFromEuler(new THREE.Euler(target.x, target.y, 0));
                 const started = performance.now();
+                voxelGrid.visible = false;
                 const snap = (time) => {
                     const progress = Math.min(1, (time - started) / 260);
                     const eased = 1 - (1 - progress) ** 3;
-                    voxelRoot.rotation.set(rotationX * (1 - eased), rotationY * (1 - eased), 0);
+                    voxelRoot.quaternion.slerpQuaternions(startRotation, targetRotation, eased);
                     if (progress < 1) voxelSnapFrame = requestAnimationFrame(snap);
                     else {
                         voxelSnapFrame = null;
-                        voxelBackdrop.visible = true;
+                        voxelRoot.rotation.set(target.x, target.y, 0);
                         voxelGrid.visible = this.gridVisible;
                     }
                     this.renderVoxelScene();
@@ -869,7 +1525,9 @@ document.addEventListener("alpine:init", () => {
                 const point = this.pointFromEvent(event);
                 const pixels = this.activeContext().getImageData(LAYER_PADDING, LAYER_PADDING, CANVAS_SIZE, CANVAS_SIZE).data;
                 const start = (point.y * CANVAS_SIZE + point.x) * 4;
-                const target = [pixels[start], pixels[start + 1], pixels[start + 2], pixels[start + 3]];
+                const cached = quantizedPalettes.get(this.layerViewKey());
+                const target = hexColor(this.palettePixelColor(pixels, start, cached));
+                target[3] = pixels[start + 3];
                 const tolerance = Math.max(0, Math.min(255, Number(this.wandTolerance) || 0));
                 const mask = new Uint8Array(LAYER_SIZE * LAYER_SIZE);
                 const visited = new Uint8Array(CANVAS_SIZE * CANVAS_SIZE);
@@ -879,7 +1537,7 @@ document.addEventListener("alpine:init", () => {
                     if (visited[index]) continue;
                     visited[index] = 1;
                     const offset = index * 4;
-                    if (!matchesColor(pixels, offset, target, tolerance)) continue;
+                    if (!this.matchesPalettePixel(pixels, offset, target, tolerance, cached)) continue;
                     const x = index % CANVAS_SIZE;
                     const y = Math.floor(index / CANVAS_SIZE);
                     mask[maskIndex(x, y)] = 1;
@@ -907,14 +1565,17 @@ document.addEventListener("alpine:init", () => {
                 const pixels = image.data;
                 const start = point.y * CANVAS_SIZE + point.x;
                 const offset = start * 4;
-                const target = [pixels[offset], pixels[offset + 1], pixels[offset + 2], pixels[offset + 3]];
+                const cached = quantizedPalettes.get(this.layerViewKey());
+                const target = hexColor(this.palettePixelColor(pixels, offset, cached));
+                target[3] = pixels[offset + 3];
+                this.allowPaletteColor();
                 const fill = hexColor(this.color);
                 if (target.every((channel, index) => channel === fill[index])) return;
                 const tolerance = Math.max(0, Math.min(255, Number(this.wandTolerance) || 0));
                 const visited = new Uint8Array(CANVAS_SIZE * CANVAS_SIZE);
                 const stack = [start];
                 this.pushHistory();
-                this.allowPaletteColor();
+                this.markViewEdited();
                 while (stack.length) {
                     const index = stack.pop();
                     const x = index % CANVAS_SIZE;
@@ -922,7 +1583,7 @@ document.addEventListener("alpine:init", () => {
                     if (visited[index] || (selectionMask && !selectionMask[maskIndex(x, y)])) continue;
                     visited[index] = 1;
                     const pixelOffset = index * 4;
-                    if (!matchesColor(pixels, pixelOffset, target, tolerance)) continue;
+                    if (!this.matchesPalettePixel(pixels, pixelOffset, target, tolerance, cached)) continue;
                     pixels[pixelOffset] = fill[0];
                     pixels[pixelOffset + 1] = fill[1];
                     pixels[pixelOffset + 2] = fill[2];
@@ -952,7 +1613,7 @@ document.addEventListener("alpine:init", () => {
                 const point = this.pointFromEvent(event);
                 const pixel = this.context.getImageData(point.x, point.y, 1, 1).data;
                 if (!pixel[3]) return;
-                this.color = `#${pixel[0].toString(16).padStart(2, "0")}${pixel[1].toString(16).padStart(2, "0")}${pixel[2].toString(16).padStart(2, "0")}`;
+                this.color = this.canonicalPixelColor(pixel, 0);
             },
 
             endEyedropper(event) {
@@ -966,9 +1627,11 @@ document.addEventListener("alpine:init", () => {
                 event.preventDefault();
                 this.pointerId = event.pointerId;
                 this.capturePointer(event);
-                const point = this.pointFromEvent(event);
+                const rawPoint = this.pointFromEvent(event);
+                const mode = event.shiftKey ? "add" : this.containsPoint(rawPoint) ? "move" : "create";
+                const point = mode === "move" ? rawPoint : this.updateCenterGuides(rawPoint);
                 selectionAnchor = {
-                    mode: this.containsPoint(point) ? "move" : "create",
+                    mode,
                     start: point,
                     selection: this.selection ? { ...this.selection } : null,
                     mask: selectionMask ? new Uint8Array(selectionMask) : null,
@@ -984,23 +1647,29 @@ document.addEventListener("alpine:init", () => {
                     selectionAnchor.moved = Math.hypot(event.clientX - selectionAnchor.clientX, event.clientY - selectionAnchor.clientY) >= 2;
                     if (!selectionAnchor.moved) return;
                 }
-                const point = selectionAnchor.mode === "move" ? this.worldPointFromEvent(event) : this.pointFromEvent(event);
+                const point = selectionAnchor.mode === "move" ? this.worldPointFromEvent(event) : this.updateCenterGuides(this.pointFromEvent(event));
                 if (selectionAnchor.mode === "move") {
                     const selection = selectionAnchor.selection;
-                    const dx = Math.max(-LAYER_PADDING - selection.x, Math.min(CANVAS_SIZE + LAYER_PADDING - selection.x - selection.width, point.x - selectionAnchor.start.x));
-                    const dy = Math.max(-LAYER_PADDING - selection.y, Math.min(CANVAS_SIZE + LAYER_PADDING - selection.y - selection.height, point.y - selectionAnchor.start.y));
+                    let dx = Math.max(-LAYER_PADDING - selection.x, Math.min(CANVAS_SIZE + LAYER_PADDING - selection.x - selection.width, point.x - selectionAnchor.start.x));
+                    let dy = Math.max(-LAYER_PADDING - selection.y, Math.min(CANVAS_SIZE + LAYER_PADDING - selection.y - selection.height, point.y - selectionAnchor.start.y));
+                    ({ dx, dy } = this.updateSelectionGuides(selection, dx, dy));
                     this.setSelectionMask(translateMask(selectionAnchor.mask, dx, dy));
                     return;
                 }
                 const start = selectionAnchor.start;
                 const x = Math.min(start.x, point.x);
                 const y = Math.min(start.y, point.y);
-                this.setSelectionMask(rectangleMask(x, y, Math.abs(point.x - start.x) + 1, Math.abs(point.y - start.y) + 1));
+                const rectangle = rectangleMask(x, y, Math.abs(point.x - start.x) + 1, Math.abs(point.y - start.y) + 1);
+                if (selectionAnchor.mode === "add" && selectionAnchor.mask) {
+                    const combined = new Uint8Array(selectionAnchor.mask);
+                    for (let index = 0; index < rectangle.length; index++) if (rectangle[index]) combined[index] = 1;
+                    this.setSelectionMask(combined);
+                } else this.setSelectionMask(rectangle);
             },
 
             endSelection(event) {
                 if (event.pointerId !== this.pointerId) return;
-                if (!selectionAnchor.moved) this.clearSelection();
+                if (!selectionAnchor.moved && selectionAnchor.mode !== "add") this.clearSelection();
                 selectionAnchor = null;
                 this.pointerId = null;
             },
@@ -1015,7 +1684,7 @@ document.addEventListener("alpine:init", () => {
                 this.capturePointer(event);
                 const selection = { ...this.selection };
                 const mask = new Uint8Array(selectionMask);
-                const pixels = selectionPixels(canvases.get(this.activeLayerId), mask, selection);
+                const pixels = selectionPixels(this.canvasFor(), mask, selection);
                 this.pointerId = event.pointerId;
                 moveState = {
                     start: point,
@@ -1033,11 +1702,13 @@ document.addEventListener("alpine:init", () => {
                 if (event.pointerId !== this.pointerId) return;
                 const point = this.worldPointFromEvent(event);
                 const selection = moveState.selection;
-                const dx = Math.max(-LAYER_PADDING - selection.x, Math.min(CANVAS_SIZE + LAYER_PADDING - selection.x - selection.width, point.x - moveState.start.x));
-                const dy = Math.max(-LAYER_PADDING - selection.y, Math.min(CANVAS_SIZE + LAYER_PADDING - selection.y - selection.height, point.y - moveState.start.y));
+                let dx = Math.max(-LAYER_PADDING - selection.x, Math.min(CANVAS_SIZE + LAYER_PADDING - selection.x - selection.width, point.x - moveState.start.x));
+                let dy = Math.max(-LAYER_PADDING - selection.y, Math.min(CANVAS_SIZE + LAYER_PADDING - selection.y - selection.height, point.y - moveState.start.y));
+                ({ dx, dy } = this.updateSelectionGuides(selection, dx, dy));
                 if (dx === moveState.dx && dy === moveState.dy) return;
                 if (!moveState.recorded) {
                     this.pushHistory();
+                    this.markViewEdited();
                     moveState.recorded = true;
                 }
                 moveState.dx = dx;
@@ -1054,10 +1725,11 @@ document.addEventListener("alpine:init", () => {
                 if (event.pointerId !== this.pointerId) return;
                 moveState = null;
                 this.pointerId = null;
+                this.clearCenterGuides();
             },
 
             activeContext() {
-                return canvases.get(this.activeLayerId).getContext("2d", { willReadFrequently: true });
+                return this.canvasFor().getContext("2d", CANVAS_CONTEXT_OPTIONS);
             },
 
             paint(x, y) {
@@ -1067,9 +1739,15 @@ document.addEventListener("alpine:init", () => {
                 const startY = y - Math.floor((size - 1) / 2);
                 context.fillStyle = this.color;
                 for (let py = startY; py < startY + size; py++) for (let px = startX; px < startX + size; px++) {
-                    if (selectionMask && !selectionMask[maskIndex(px, py)]) continue;
-                    if (this.tool === "eraser") context.clearRect(px + LAYER_PADDING, py + LAYER_PADDING, 1, 1);
-                    else context.fillRect(px + LAYER_PADDING, py + LAYER_PADDING, 1, 1);
+                    const points = [[px, py]];
+                    if (this.verticalSymmetry) points.push([CANVAS_SIZE - 1 - px, py]);
+                    if (this.horizontalSymmetry) points.push([px, CANVAS_SIZE - 1 - py]);
+                    if (this.verticalSymmetry && this.horizontalSymmetry) points.push([CANVAS_SIZE - 1 - px, CANVAS_SIZE - 1 - py]);
+                    for (const [paintX, paintY] of points) {
+                        if (selectionMask && !selectionMask[maskIndex(paintX, paintY)]) continue;
+                        if (this.tool === "eraser") context.clearRect(paintX + LAYER_PADDING, paintY + LAYER_PADDING, 1, 1);
+                        else context.fillRect(paintX + LAYER_PADDING, paintY + LAYER_PADDING, 1, 1);
+                    }
                 }
             },
 
@@ -1100,6 +1778,7 @@ document.addEventListener("alpine:init", () => {
                 if (this.drawing) return;
                 event.preventDefault();
                 this.pushHistory();
+                this.markViewEdited();
                 if (this.tool === "pencil") this.allowPaletteColor();
                 const activeLayer = this.layers.find((layer) => layer.id === this.activeLayerId);
                 activeLayer.visible = true;
@@ -1107,6 +1786,11 @@ document.addEventListener("alpine:init", () => {
                 this.pointerId = event.pointerId;
                 this.capturePointer(event);
                 this.lastPoint = this.pointFromEvent(event);
+                straightStroke = event.shiftKey && (this.tool === "pencil" || this.tool === "eraser") ? {
+                    start: this.lastPoint,
+                    pixels: this.activeContext().getImageData(0, 0, LAYER_SIZE, LAYER_SIZE),
+                    axis: null,
+                } : null;
                 this.paint(this.lastPoint.x, this.lastPoint.y);
                 this.render();
             },
@@ -1114,6 +1798,25 @@ document.addEventListener("alpine:init", () => {
             continueStroke(event) {
                 if (!this.drawing || event.pointerId !== this.pointerId) return;
                 const point = this.pointFromEvent(event);
+                if (!straightStroke && event.shiftKey && (this.tool === "pencil" || this.tool === "eraser")) straightStroke = {
+                    start: this.lastPoint,
+                    pixels: this.activeContext().getImageData(0, 0, LAYER_SIZE, LAYER_SIZE),
+                    axis: null,
+                };
+                if (straightStroke && event.shiftKey) {
+                    const dx = Math.abs(point.x - straightStroke.start.x);
+                    const dy = Math.abs(point.y - straightStroke.start.y);
+                    if (!straightStroke.axis && (dx || dy)) straightStroke.axis = dx >= dy ? "x" : "y";
+                    const lockedPoint = straightStroke.axis === "y"
+                        ? { x: straightStroke.start.x, y: point.y }
+                        : { x: point.x, y: straightStroke.start.y };
+                    this.activeContext().putImageData(straightStroke.pixels, 0, 0);
+                    this.drawLine(straightStroke.start, lockedPoint);
+                    this.lastPoint = lockedPoint;
+                    this.render();
+                    return;
+                }
+                straightStroke = null;
                 this.drawLine(this.lastPoint, point);
                 this.lastPoint = point;
                 this.render();
@@ -1124,17 +1827,19 @@ document.addEventListener("alpine:init", () => {
                 this.drawing = false;
                 this.pointerId = null;
                 this.lastPoint = null;
+                straightStroke = null;
             },
 
             snapshot() {
                 return Alpine.raw({
-                    layers: this.layers.map(({ id, name, visible }) => ({ id, name, visible })),
+                    layers: this.layers.map(({ id, name, visible, depth, offset }) => ({ id, name, visible, depth, offset })),
                     activeLayerId: this.activeLayerId,
+                    editedViews: [...editedViews],
                     selectionMask: selectionMask ? new Uint8Array(selectionMask) : null,
-                    pixels: this.layers.map(({ id }) => ({
-                        id,
-                        data: canvases.get(id).getContext("2d").getImageData(0, 0, LAYER_SIZE, LAYER_SIZE),
-                    })),
+                    pixels: ORIENTATIONS.flatMap((orientation) => this.layers.map(({ id }) => ({
+                        key: viewKey(orientation.id, id),
+                        data: this.canvasFor(id, orientation.id).getContext("2d").getImageData(0, 0, LAYER_SIZE, LAYER_SIZE),
+                    }))),
                 });
             },
 
@@ -1144,10 +1849,14 @@ document.addEventListener("alpine:init", () => {
                 for (const pixels of snapshot.pixels) {
                     const canvas = createLayerCanvas();
                     canvas.getContext("2d").putImageData(pixels.data, 0, 0);
-                    canvases.set(pixels.id, canvas);
+                    canvases.set(pixels.key, canvas);
                 }
-                this.layers = snapshot.layers.map((layer) => ({ ...layer }));
+                this.layers = snapshot.layers.map((layer) => ({ ...layer, depth: layerDepth(layer), offset: Math.max(0, Math.floor(Number(layer.offset) || 0)) }));
+                this.normalizeLayerDepths();
+                this.normalizeLayerOffsets();
                 this.activeLayerId = snapshot.activeLayerId;
+                editedViews.clear();
+                for (const key of snapshot.editedViews ?? []) editedViews.add(key);
                 if (snapshot.selectionMask) this.setSelectionMask(new Uint8Array(snapshot.selectionMask));
                 else this.clearSelection();
                 selectionAnchor = null;
@@ -1180,6 +1889,7 @@ document.addEventListener("alpine:init", () => {
 
             clearCanvas() {
                 this.pushHistory();
+                this.markViewEdited();
                 if (selectionMask) clearMaskedPixels(this.activeContext(), selectionMask);
                 else this.activeContext().clearRect(0, 0, LAYER_SIZE, LAYER_SIZE);
                 this.render();
@@ -1192,7 +1902,8 @@ document.addEventListener("alpine:init", () => {
                 dy = Math.max(-LAYER_PADDING - selection.y, Math.min(CANVAS_SIZE + LAYER_PADDING - selection.y - selection.height, dy));
                 if (!dx && !dy) return;
                 this.pushHistory();
-                const source = canvases.get(this.activeLayerId);
+                this.markViewEdited();
+                const source = this.canvasFor();
                 const mask = new Uint8Array(selectionMask);
                 const pixels = selectionPixels(source, mask, selection);
                 const context = this.activeContext();
@@ -1206,8 +1917,8 @@ document.addEventListener("alpine:init", () => {
                 if (!selectionMask || !this.selection) return;
                 const mask = new Uint8Array(selectionMask);
                 const bounds = { ...this.selection };
-                const pixels = selectionPixels(canvases.get(this.activeLayerId), mask, bounds);
-                internalClipboard = { pixels, mask, bounds, quantizedPalette: quantizedPalettes.get(this.activeLayerId) };
+                const pixels = selectionPixels(this.canvasFor(), mask, bounds);
+                internalClipboard = { pixels, mask, bounds, quantizedPalette: quantizedPalettes.get(this.layerViewKey()) };
                 if (navigator.clipboard?.write && window.ClipboardItem) {
                     pixels.toBlob((blob) => {
                         if (blob) navigator.clipboard.write([new ClipboardItem({ "image/png": blob })]).catch(() => {});
@@ -1215,6 +1926,7 @@ document.addEventListener("alpine:init", () => {
                 }
                 if (!cut) return;
                 this.pushHistory();
+                this.markViewEdited();
                 clearMaskedPixels(this.activeContext(), mask);
                 this.render();
             },
@@ -1223,11 +1935,12 @@ document.addEventListener("alpine:init", () => {
                 if (!internalClipboard) return;
                 this.pushHistory();
                 const layer = this.addLayer("Pasted Selection", false);
+                this.markViewEdited(layer.id);
                 const { pixels, mask, bounds, quantizedPalette } = internalClipboard;
-                canvases.get(layer.id).getContext("2d").drawImage(pixels, bounds.x + LAYER_PADDING, bounds.y + LAYER_PADDING);
+                this.canvasFor(layer.id).getContext("2d").drawImage(pixels, bounds.x + LAYER_PADDING, bounds.y + LAYER_PADDING);
                 if (quantizedPalette) {
                     const palette = [...quantizedPalette.palette];
-                    quantizedPalettes.set(layer.id, { palette, colors: palette.map(hexColor), allowed: new Set(palette) });
+                    quantizedPalettes.set(this.layerViewKey(layer.id), { palette, colors: palette.map(hexColor), allowed: new Set(palette), confirmed: quantizedPalette.confirmed, locked: quantizedPalette.locked });
                 }
                 this.setSelectionMask(new Uint8Array(mask));
                 this.render();
@@ -1308,7 +2021,8 @@ document.addEventListener("alpine:init", () => {
                         const fallback = pasted ? `Pasted Image ${index + 1}` : `Imported Image ${index + 1}`;
                         const name = pasted ? fallback : file.name.replace(/\.[^.]+$/, "") || fallback;
                         const layer = this.addLayer(name, false);
-                        const context = canvases.get(layer.id).getContext("2d");
+                        this.markViewEdited(layer.id);
+                        const context = this.canvasFor(layer.id).getContext("2d");
                         const scale = Math.min(1, CANVAS_SIZE / image.width, CANVAS_SIZE / image.height);
                         const width = Math.max(1, Math.round(image.width * scale));
                         const height = Math.max(1, Math.round(image.height * scale));

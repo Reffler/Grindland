@@ -192,16 +192,15 @@ button svg {
 .swatches {
     gap: 5px;
     width: 100%;
+    min-height: 30px;
     overflow-x: auto;
     padding: 3px 2px;
 }
 
 .palette-control {
-    min-width: 120px;
-    max-width: 280px;
-    flex: 1;
+    min-width: 0;
     display: grid;
-    gap: 2px;
+    gap: 10px;
 }
 
 .quantization {
@@ -251,7 +250,59 @@ button svg {
 .editor-body {
     min-height: 0;
     display: grid;
-    grid-template-columns: minmax(0, 1fr) 264px;
+    grid-template-columns: 220px minmax(0, 1fr) 264px;
+}
+
+.palette-panel {
+    min-height: 0;
+    display: grid;
+    grid-template-rows: auto 1fr;
+    border-right: 1px solid #34383c;
+    background: #1b1e21;
+}
+
+.palette-header {
+    min-height: 52px;
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    padding: 7px 14px;
+    border-bottom: 1px solid #34383c;
+}
+
+.palette-header h2 {
+    margin: 0;
+    font-size: 14px;
+    letter-spacing: 0;
+}
+
+.palette-header button {
+    width: 32px;
+    height: 32px;
+}
+
+.palette-content {
+    min-height: 0;
+    overflow-y: auto;
+    padding: 12px;
+}
+
+.palette-current {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    margin-bottom: 10px;
+    color: #b8bdc0;
+    font-size: 12px;
+    font-weight: 600;
+}
+
+.palette-panel .swatches {
+    min-height: 62px;
+    display: grid;
+    grid-template-columns: repeat(auto-fill, 24px);
+    align-content: start;
+    overflow: visible;
 }
 
 .workspace {
@@ -268,9 +319,18 @@ button svg {
     background: #1a2423;
 }
 
+.workspace-content {
+    width: min(100%, calc(min(78vmin, 768px) + 244px));
+    min-width: 0;
+    display: grid;
+    grid-template-columns: minmax(0, 1fr) 224px;
+    align-items: end;
+    gap: 20px;
+}
+
 .canvas-frame {
     position: relative;
-    width: min(78vmin, 768px);
+    width: 100%;
     aspect-ratio: 1;
     overflow: visible;
     border: 1px solid #666d71;
@@ -283,6 +343,62 @@ button svg {
     background-position: 0 0, 0 8px, 8px -8px, -8px 0;
     background-size: 16px 16px;
     box-shadow: 0 10px 28px rgb(0 0 0 / 35%);
+}
+
+.future-window {
+    position: relative;
+    width: 224px;
+    aspect-ratio: 1;
+    overflow: hidden;
+    border: 1px solid #c9c9c9;
+    background: #ffffff;
+    box-shadow: 0 6px 18px rgb(0 0 0 / 28%);
+}
+
+.model-preview {
+    position: absolute;
+    inset: 0;
+    width: 100%;
+    height: 100%;
+    image-rendering: pixelated;
+    cursor: grab;
+    touch-action: none;
+}
+
+.model-preview:active {
+    cursor: grabbing;
+}
+
+.preview-presets {
+    position: absolute;
+    right: 4px;
+    bottom: 4px;
+    left: 4px;
+    display: grid;
+    grid-template-columns: repeat(4, 1fr);
+    gap: 2px;
+    pointer-events: none;
+}
+
+.preview-presets button {
+    width: 24px;
+    height: 22px;
+    border-color: #c9c9c9;
+    border-radius: 3px;
+    background: rgb(255 255 255 / 88%);
+    color: #202427;
+    pointer-events: auto;
+}
+
+.preview-presets button:hover:not(:disabled) {
+    border-color: #666d71;
+    background: #ffffff;
+    color: #111315;
+}
+
+.preview-presets button svg {
+    width: 13px;
+    height: 13px;
 }
 
 .canvas-frame > canvas,
@@ -307,7 +423,7 @@ button svg {
 
 .canvas-frame > .voxel-canvas {
     z-index: 1;
-    image-rendering: auto;
+    image-rendering: pixelated;
     pointer-events: none;
 }
 
@@ -320,6 +436,27 @@ button svg {
 
 .palette-highlight.pulse {
     animation: palette-pulse 1s ease-out;
+}
+
+.center-guide {
+    position: absolute;
+    z-index: 7;
+    background: #ff00ff;
+    pointer-events: none;
+}
+
+.center-guide-x {
+    top: 0;
+    bottom: 0;
+    left: 50%;
+    width: 1px;
+}
+
+.center-guide-y {
+    right: 0;
+    left: 0;
+    top: 50%;
+    height: 1px;
 }
 
 .drop-indicator {
@@ -348,21 +485,32 @@ button svg {
 }
 
 .layers-header {
-    min-height: 52px;
-    display: flex;
+    min-height: 90px;
+    display: grid;
+    grid-template-columns: 1fr auto;
     align-items: center;
-    justify-content: space-between;
+    gap: 6px;
     padding: 7px 8px 7px 14px;
     border-bottom: 1px solid #34383c;
 }
 
-.layers-header h2 {
-    margin: 0;
-    font-size: 14px;
-    letter-spacing: 0;
+.orientation-tabs {
+    grid-column: 1 / -1;
+    display: grid;
+    grid-template-columns: repeat(6, 1fr);
+    gap: 2px;
+}
+
+.orientation-tabs button {
+    width: 100%;
+    height: 30px;
+    padding: 0 3px;
+    font-size: 10px;
+    font-weight: 600;
 }
 
 .layer-actions {
+    grid-column: 2;
     display: flex;
     gap: 2px;
 }
@@ -379,9 +527,9 @@ button svg {
 }
 
 .layer-row {
-    height: 58px;
+    height: 64px;
     display: grid;
-    grid-template-columns: 18px 28px 42px minmax(0, 1fr);
+    grid-template-columns: 18px 28px 42px minmax(0, 1fr) 44px;
     align-items: center;
     gap: 6px;
     padding: 5px 7px 5px 3px;
@@ -457,6 +605,31 @@ button svg {
 .layer-name:focus {
     border-color: #4b5155;
     background: #17191b;
+}
+
+.layer-depth {
+    min-width: 0;
+    width: 44px;
+    padding: 5px 3px;
+    border: 1px solid #4b5155;
+    border-radius: 3px;
+    background: #17191b;
+    color: #e3e5e6;
+    font: inherit;
+    font-size: 12px;
+}
+
+.layer-depth-control {
+    width: 44px;
+    display: grid;
+    gap: 2px;
+}
+
+.layer-offset {
+    width: 44px;
+    height: 18px;
+    margin: 0;
+    accent-color: #55d6be;
 }
 
 .pixel-grid {
@@ -539,7 +712,28 @@ button svg {
 
     .editor-body {
         grid-template-columns: 1fr;
-        grid-template-rows: minmax(420px, auto) 220px;
+        grid-template-rows: auto minmax(420px, auto) 220px;
+    }
+
+    .palette-panel {
+        border-right: 0;
+        border-bottom: 1px solid #34383c;
+    }
+
+    .palette-content {
+        display: grid;
+        grid-template-columns: auto minmax(0, 1fr);
+        align-items: start;
+        gap: 12px;
+    }
+
+    .palette-current {
+        gap: 10px;
+        margin-bottom: 0;
+    }
+
+    .palette-panel .swatches {
+        min-height: 30px;
     }
 
     .layers-panel {
@@ -547,7 +741,19 @@ button svg {
         border-left: 0;
     }
 
-    .canvas-frame {
+    .workspace-content {
         width: min(92vw, 640px);
+        grid-template-columns: minmax(0, 1fr);
+        gap: 12px;
+    }
+
+    .future-window {
+        width: 192px;
+        justify-self: end;
+    }
+
+    .preview-presets button {
+        width: 20px;
+        height: 20px;
     }
 }

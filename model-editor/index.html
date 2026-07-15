@@ -3,10 +3,13 @@
 <head>
     <meta charset="utf-8">
     <meta name="viewport" content="width=device-width, initial-scale=1">
+    <meta http-equiv="Cache-Control" content="no-cache, no-store, must-revalidate">
+    <meta http-equiv="Pragma" content="no-cache">
+    <meta http-equiv="Expires" content="0">
     <title>Model Editor</title>
-    <link rel="stylesheet" href="styles.css">
+    <link rel="stylesheet" href="styles.css?v=20260714-7">
     <script defer src="https://unpkg.com/lucide@0.468.0/dist/umd/lucide.min.js"></script>
-    <script defer src="editor.js"></script>
+    <script defer src="editor.js?v=20260714-9"></script>
     <script defer src="https://cdn.jsdelivr.net/npm/alpinejs@3.x.x/dist/cdn.min.js"></script>
 </head>
 <body>
@@ -54,41 +57,6 @@
                     <input type="number" min="0" max="255" x-model.number="wandTolerance" aria-label="Magic Wand tolerance value">
                 </label>
 
-                <label class="color-control" title="Color">
-                    <input type="color" x-model="color" aria-label="Drawing color">
-                </label>
-
-                <div class="palette-control">
-                    <div class="swatches" aria-label="Color swatches">
-                        <template x-for="swatch in palette" :key="swatch">
-                            <button type="button" class="swatch" :class="{ selected: color === swatch }" :style="`--swatch: ${swatch}`" @click="highlightPaletteColor(swatch); color = swatch; tool = 'pencil'" :title="swatch" :aria-label="`Use ${swatch}`"></button>
-                        </template>
-                    </div>
-                    <div class="quantization">
-                        <span>Colors</span>
-                        <input
-                            type="range"
-                            min="1"
-                            :max="quantizationMax"
-                            :value="quantization"
-                            @pointerdown="beginQuantization()"
-                            @input="quantizeActiveLayer($event.target.value)"
-                            aria-label="Color quantization"
-                        >
-                        <output x-text="quantization"></output>
-                        <button
-                            type="button"
-                            class="quantization-confirm"
-                            :disabled="!quantizationPending"
-                            @click="confirmQuantization()"
-                            title="Apply quantization"
-                            aria-label="Apply quantization"
-                        >
-                            <i data-lucide="check"></i>
-                        </button>
-                    </div>
-                </div>
-
                 <div class="tool-group">
                     <button type="button" @click="undo()" :disabled="history.length === 0" title="Undo" aria-label="Undo">
                         <i data-lucide="undo-2"></i>
@@ -98,6 +66,12 @@
                     </button>
                     <button type="button" :class="{ active: gridVisible }" @click="gridVisible = !gridVisible" title="Toggle grid" aria-label="Toggle grid">
                         <i data-lucide="grid-3x3"></i>
+                    </button>
+                    <button type="button" :class="{ active: verticalSymmetry }" @click="verticalSymmetry = !verticalSymmetry; renderVoxelCursor()" title="Vertical symmetry" aria-label="Toggle vertical symmetry">
+                        <i data-lucide="flip-horizontal-2"></i>
+                    </button>
+                    <button type="button" :class="{ active: horizontalSymmetry }" @click="horizontalSymmetry = !horizontalSymmetry; renderVoxelCursor()" title="Horizontal symmetry" aria-label="Toggle horizontal symmetry">
+                        <i data-lucide="flip-vertical-2"></i>
                     </button>
                     <button type="button" @click="download()" title="Export PNG" aria-label="Export PNG">
                         <i data-lucide="download"></i>
@@ -111,6 +85,54 @@
         </header>
 
         <div class="editor-body">
+            <aside class="palette-panel">
+                <header class="palette-header">
+                    <h2>Colors</h2>
+                    <button type="button" @click="$refs.paletteInput.click()" title="Import GPL palette" aria-label="Import GPL palette">
+                        <i data-lucide="upload"></i>
+                    </button>
+                    <input x-ref="paletteInput" class="file-input" type="file" accept=".gpl,text/plain" @change="importPaletteFile($event.target.files[0]); $event.target.value = ''">
+                </header>
+                <div class="palette-content">
+                    <div class="palette-current">
+                        <span>Current</span>
+                        <label class="color-control" title="Color">
+                            <input type="color" x-model="color" aria-label="Drawing color">
+                        </label>
+                    </div>
+                    <div class="palette-control">
+                        <div class="quantization">
+                            <span>Colors</span>
+                            <input
+                                type="range"
+                                min="1"
+                                :max="quantizationMax"
+                                :value="quantization"
+                                @pointerdown="beginQuantization()"
+                                @input="quantizeActiveLayer($event.target.value)"
+                                aria-label="Color quantization"
+                            >
+                            <output x-text="quantization"></output>
+                            <button
+                                type="button"
+                                class="quantization-confirm"
+                                :disabled="!quantizationPending"
+                                @click="confirmQuantization()"
+                                title="Apply quantization"
+                                aria-label="Apply quantization"
+                            >
+                                <i data-lucide="check"></i>
+                            </button>
+                        </div>
+                        <div class="swatches" aria-label="Color swatches">
+                            <template x-for="swatch in palette" :key="swatch">
+                                <button type="button" class="swatch" :class="{ selected: color === swatch }" :style="`--swatch: ${swatch}`" @click="highlightPaletteColor(swatch); color = swatch; tool = 'pencil'" :title="swatch" :aria-label="`Use ${swatch}`"></button>
+                            </template>
+                        </div>
+                    </div>
+                </div>
+            </aside>
+
             <section
                 class="workspace"
                 :class="{ 'drop-active': dropActive }"
@@ -119,38 +141,69 @@
                 @dragleave.self="dropActive = false"
                 @drop.prevent="handleDrop($event)"
             >
-                <div class="canvas-frame">
-                    <canvas
-                        x-ref="canvas"
-                        width="64"
-                        height="64"
-                        :class="`tool-${tool}`"
-                        @pointerdown="startPointer($event)"
-                        @pointermove="continuePointer($event)"
-                        @pointerup.window="endPointer($event)"
-                        @pointercancel.window="endPointer($event)"
-                        @pointerleave="clearHover()"
-                        @auxclick.prevent
-                        @contextmenu.prevent
-                        aria-label="64 by 64 pixel drawing canvas"
-                    ></canvas>
-                    <canvas x-ref="voxelCanvas" class="voxel-canvas" aria-hidden="true"></canvas>
-                    <canvas x-ref="paletteHighlight" class="palette-highlight" width="64" height="64" x-show="!voxelReady" aria-hidden="true"></canvas>
-                    <div class="pixel-grid" x-show="gridVisible && !voxelReady" aria-hidden="true"></div>
-                    <svg class="selection-outline" x-show="selection && !voxelReady" viewBox="0 0 64 64" preserveAspectRatio="none" aria-hidden="true">
-                        <path :d="selectionPath"></path>
-                        <path class="marching" :d="selectionPath"></path>
-                    </svg>
-                    <div
-                        class="selection-hitbox"
-                        x-show="tool === 'move' && selection && !voxelReady"
-                        :style="selectionStyle()"
-                        @pointerdown.stop="startMove($event)"
-                        @pointermove="continuePointer($event)"
-                        @pointerleave="clearHover()"
-                        aria-hidden="true"
-                    ></div>
-                    <div class="pixel-cursor" x-show="hoverPoint && !voxelReady" :style="hoverStyle()" aria-hidden="true"></div>
+                <div class="workspace-content">
+                    <div class="canvas-frame">
+                        <canvas
+                            x-ref="canvas"
+                            width="64"
+                            height="64"
+                            :class="`tool-${tool}`"
+                            @pointerdown="startPointer($event)"
+                            @pointermove="continuePointer($event)"
+                            @pointerup.window="endPointer($event)"
+                            @pointercancel.window="endPointer($event)"
+                            @pointerleave="clearHover()"
+                            @auxclick.prevent
+                            @contextmenu.prevent
+                            aria-label="64 by 64 pixel drawing canvas"
+                        ></canvas>
+                        <canvas x-ref="voxelCanvas" class="voxel-canvas" aria-hidden="true"></canvas>
+                        <canvas x-ref="paletteHighlight" class="palette-highlight" width="64" height="64" x-show="!voxelReady" aria-hidden="true"></canvas>
+                        <div class="pixel-grid" x-show="gridVisible && !voxelReady" aria-hidden="true"></div>
+                        <div class="center-guide center-guide-x" x-show="centerGuideX || verticalSymmetry" aria-hidden="true"></div>
+                        <div class="center-guide center-guide-y" x-show="centerGuideY || horizontalSymmetry" aria-hidden="true"></div>
+                        <svg class="selection-outline" x-show="selection && !voxelReady" viewBox="0 0 64 64" preserveAspectRatio="none" aria-hidden="true">
+                            <path :d="selectionPath"></path>
+                            <path class="marching" :d="selectionPath"></path>
+                        </svg>
+                        <div
+                            class="selection-hitbox"
+                            x-show="tool === 'move' && selection && !voxelReady"
+                            :style="selectionStyle()"
+                            @pointerdown.stop="startMove($event)"
+                            @pointermove="continuePointer($event)"
+                            @pointerleave="clearHover()"
+                            aria-hidden="true"
+                        ></div>
+                        <div class="pixel-cursor" x-show="hoverPoint && !voxelReady" :style="hoverStyle()" aria-hidden="true"></div>
+                    </div>
+                    <div class="future-window">
+                        <canvas
+                            x-ref="previewCanvas"
+                            class="model-preview"
+                            @pointerdown="startPreviewRotation($event)"
+                            @pointermove="continuePreviewRotation($event)"
+                            @pointerup.window="endPreviewRotation($event)"
+                            @pointercancel.window="endPreviewRotation($event)"
+                            @auxclick.prevent
+                            @contextmenu.prevent
+                            aria-label="Rotatable model preview"
+                        ></canvas>
+                        <div class="preview-presets" role="group" aria-label="Preview camera presets">
+                            <button type="button" @click="setPreviewView('perspective')" title="Perspective view" aria-label="Perspective view">
+                                <i data-lucide="box"></i>
+                            </button>
+                            <button type="button" @click="setPreviewView('front')" title="Front view" aria-label="Front view">
+                                <i data-lucide="square"></i>
+                            </button>
+                            <button type="button" @click="setPreviewView('right')" title="Right view" aria-label="Right view">
+                                <i data-lucide="panel-right"></i>
+                            </button>
+                            <button type="button" @click="setPreviewView('top')" title="Top view" aria-label="Top view">
+                                <i data-lucide="panel-top"></i>
+                            </button>
+                        </div>
+                    </div>
                 </div>
                 <div class="drop-indicator" x-show="dropActive" aria-hidden="true">
                     <i data-lucide="image-down"></i>
@@ -159,7 +212,18 @@
 
             <aside class="layers-panel">
                 <header class="layers-header">
-                    <h2>Layers</h2>
+                    <div class="orientation-tabs" role="tablist" aria-label="Model orientation">
+                        <template x-for="orientation in orientations" :key="orientation.id">
+                            <button
+                                type="button"
+                                role="tab"
+                                :class="{ active: activeOrientation === orientation.id }"
+                                :aria-selected="activeOrientation === orientation.id"
+                                @click="switchOrientation(orientation.id)"
+                                x-text="orientation.label"
+                            ></button>
+                        </template>
+                    </div>
                     <div class="layer-actions">
                         <button type="button" @click="addLayer()" title="New layer" aria-label="New layer">
                             <i data-lucide="plus"></i>
@@ -204,6 +268,39 @@
                                 @dragstart.stop.prevent
                                 aria-label="Layer name"
                             >
+                            <div class="layer-depth-control">
+                                <input
+                                    class="layer-depth"
+                                    type="number"
+                                    :min="layers[layers.indexOf(layer) + 1]?.depth ?? 1"
+                                    :value="layer.depth"
+                                    @input="setLayerDepth(layer, $event.target)"
+                                    @pointerdown.stop="activeLayerId = layer.id"
+                                    @dblclick.stop
+                                    @dragstart.stop.prevent
+                                    title="Voxel depth"
+                                    aria-label="Voxel depth"
+                                >
+                                <input
+                                    class="layer-offset"
+                                    type="range"
+                                    min="0"
+                                    :max="Math.max(0, (layers[layers.indexOf(layer) - 1]?.depth ?? layer.depth) - layer.depth)"
+                                    step="1"
+                                    :value="layer.offset"
+                                    :disabled="layers.indexOf(layer) === 0 || layer.depth === layers[layers.indexOf(layer) - 1]?.depth"
+                                    draggable="false"
+                                    @input="setLayerOffset(layer, $event.target)"
+                                    @pointerdown.stop="activeLayerId = layer.id; editingLayerId = layer.id"
+                                    @pointerup.stop="editingLayerId = null"
+                                    @pointercancel.stop="editingLayerId = null"
+                                    @blur="editingLayerId = null"
+                                    @dblclick.stop
+                                    @dragstart.stop.prevent
+                                    :title="`Depth offset: ${layer.offset}`"
+                                    aria-label="Layer depth offset"
+                                >
+                            </div>
                         </div>
                     </template>
                 </div>
