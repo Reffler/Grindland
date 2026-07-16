@@ -8,9 +8,9 @@
     <meta http-equiv="Expires" content="0">
     <link rel="icon" href="data:,">
     <title>Model Editor</title>
-    <link rel="stylesheet" href="styles.css?v=20260715-25">
+    <link rel="stylesheet" href="styles.css?v=20260715-40">
     <script defer src="https://unpkg.com/lucide@0.468.0/dist/umd/lucide.min.js"></script>
-    <script defer src="editor.js?v=20260715-56"></script>
+    <script defer src="editor.js?v=20260715-68"></script>
     <script defer src="https://cdn.jsdelivr.net/npm/alpinejs@3.x.x/dist/cdn.min.js"></script>
 </head>
 <body>
@@ -193,102 +193,147 @@
                             <button type="button" @click="addLayer()" title="New layer" aria-label="New layer">
                                 <i data-lucide="plus"></i>
                             </button>
+                            <button type="button" @click="createGroup()" title="New group" aria-label="New layer group">
+                                <i data-lucide="folder-plus"></i>
+                            </button>
                             <button type="button" @click="duplicateLayer()" :disabled="!activeLayerId" title="Duplicate layer" aria-label="Duplicate layer">
                                 <i data-lucide="copy"></i>
                             </button>
-                            <button type="button" @click="removeLayer()" :disabled="layers.length <= 1" title="Delete layer" aria-label="Delete layer">
+                            <button type="button" @click="removeLayerOrGroup()" :disabled="!activeGroupId && (!activeLayerId || layers.length <= 1)" title="Delete layer or group" aria-label="Delete layer or group">
                                 <i data-lucide="trash-2"></i>
                             </button>
                         </div>
                     </header>
 
                     <div class="layers-list">
-                        <template x-for="layer in layers" :key="layer.id">
-                        <div
-                            class="layer-row"
-                            :class="{ active: activeLayerId === layer.id, dragging: draggedLayerId === layer.id }"
-                            :draggable="editingLayerId !== layer.id"
-                            @click="activateLayer(layer.id)"
-                            @dblclick="selectLayerPixels(layer.id)"
-                            @dragstart="beginLayerDrag(layer.id, $event)"
-                            @dragover.prevent="reorderLayer(layer.id, $event)"
-                            @drop.stop.prevent="finishLayerDrag()"
-                            @dragend="finishLayerDrag()"
-                        >
-                            <i class="drag-handle" data-lucide="grip-vertical" aria-hidden="true"></i>
-                            <button type="button" class="visibility" :class="{ muted: !layer.visible }" @click.stop="toggleLayer(layer)" title="Toggle visibility" aria-label="Toggle layer visibility">
-                                <i data-lucide="eye"></i>
-                            </button>
-                            <span class="layer-thumbnail">
-                                <canvas width="64" height="64" :data-layer-thumbnail="layer.id"></canvas>
-                            </span>
-                            <input
-                                class="layer-name"
-                                x-model="layer.name"
-                                draggable="false"
-                                @pointerdown.stop="activeLayerId = layer.id; editingLayerId = layer.id"
-                                @focus="editingLayerId = layer.id"
-                                @blur="editingLayerId = null"
-                                @dblclick.stop
-                                @dragstart.stop.prevent
-                                aria-label="Layer name"
-                            >
-                            <div class="layer-depth-control">
-                                <input
-                                    class="layer-depth"
-                                    type="number"
-                                    :min="layerDepthMin(layer)"
-                                    :max="layerDepthMax(layer)"
-                                    step="1"
-                                    :value="layer.depth"
-                                    draggable="false"
-                                    @input="setLayerDepth(layer, $event.target)"
-                                    @pointerdown.stop="beginLayerValueEdit(layer, 'depth')"
-                                    @focus="beginLayerValueEdit(layer, 'depth')"
-                                    @blur="endLayerValueEdit()"
-                                    @dblclick.stop
-                                    @dragstart.stop.prevent
-                                    title="Voxel depth"
-                                    aria-label="Voxel depth"
-                                >
-                                <input
-                                    class="layer-offset"
-                                    type="number"
-                                    :min="layerOffsetMin(layer)"
-                                    :max="layerOffsetMax(layer)"
-                                    step="1"
-                                    :value="layer.offset"
-                                    draggable="false"
-                                    @input="setLayerOffset(layer, $event.target)"
-                                    @pointerdown.stop="beginLayerValueEdit(layer, 'offset')"
-                                    @focus="beginLayerValueEdit(layer, 'offset')"
-                                    @blur="endLayerValueEdit()"
-                                    @dblclick.stop
-                                    @dragstart.stop.prevent
-                                    :title="`Depth offset: ${layer.offset}`"
-                                    aria-label="Layer depth offset"
-                                >
+                        <div class="layer-root-drop layer-root-drop-top" :class="{ active: layerDropTarget === 'root:top' }" x-show="draggedLayerWasGrouped" @dragover.prevent.stop="setRootDrop('top', $event)" @drop.prevent.stop="finishLayerDrag()"></div>
+                        <template x-for="entry in layerEntries()" :key="entry.key">
+                            <div class="layer-list-entry" :data-layer-entry="entry.key" :class="{ 'group-member-entry': entry.type === 'layer' && entry.grouped, 'last-group-member': entry.lastInGroup }">
+                                <template x-if="entry.type === 'group'">
+                                    <div
+                                        class="layer-group-row"
+                                        :class="{
+                                            active: activeGroupId === entry.group.id,
+                                            'drop-inside': layerDropTarget === `group:${entry.group.id}` && layerDropPosition === 'inside'
+                                        }"
+                                        :draggable="editingGroupId !== entry.group.id"
+                                        @click="activateGroup(entry.group.id)"
+                                        @dragstart="beginGroupDrag(entry.group.id, $event)"
+                                        @dragover.prevent.stop="setGroupDrop(entry.group.id, $event)"
+                                        @drop.prevent.stop="finishLayerDrag()"
+                                        @dragend="finishLayerDrag()"
+                                    >
+                                        <button type="button" class="visibility group-visibility" :class="{ muted: !groupVisible(entry.group), partial: groupPartiallyVisible(entry.group) }" :disabled="groupLayerCount(entry.group.id) === 0" @click.stop="toggleGroupVisibility(entry.group)" title="Toggle group visibility" aria-label="Toggle group visibility">
+                                            <i data-lucide="eye"></i>
+                                        </button>
+                                        <button type="button" class="group-toggle" :class="{ expanded: !entry.group.collapsed }" @click.stop="toggleGroup(entry.group)" :title="entry.group.collapsed ? 'Expand group' : 'Collapse group'" :aria-label="entry.group.collapsed ? 'Expand group' : 'Collapse group'" :aria-expanded="!entry.group.collapsed">
+                                            <i data-lucide="chevron-right"></i>
+                                        </button>
+                                        <i class="group-icon" data-lucide="folder" aria-hidden="true"></i>
+                                        <input
+                                            class="layer-name group-name"
+                                            x-model="entry.group.name"
+                                            :readonly="editingGroupId !== entry.group.id"
+                                            :draggable="editingGroupId !== entry.group.id"
+                                            @pointerdown="activateGroup(entry.group.id)"
+                                            @dblclick.stop="editingGroupId = entry.group.id; $nextTick(() => { $event.target.readOnly = false; $event.target.select(); })"
+                                            @blur="editingGroupId = null"
+                                            @keydown.enter="$event.target.blur()"
+                                            aria-label="Group name"
+                                            title="Drag group or double-click to rename"
+                                        >
+                                    </div>
+                                </template>
+                                <template x-if="entry.type === 'layer'">
+                                    <div
+                                        class="layer-row"
+                                        :class="{
+                                            active: activeLayerId === entry.layer.id,
+                                            grouped: entry.grouped
+                                        }"
+                                        :draggable="editingLayerId !== entry.layer.id"
+                                        @click="activateLayer(entry.layer.id)"
+                                        @dblclick="selectLayerPixels(entry.layer.id)"
+                                        @dragstart="beginLayerDrag(entry.layer.id, $event)"
+                                        @dragover.prevent.stop="setLayerDrop(entry.layer.id, $event)"
+                                        @drop.stop.prevent="finishLayerDrag()"
+                                        @dragend="finishLayerDrag()"
+                                    >
+                                        <button type="button" class="visibility" :class="{ muted: !entry.layer.visible }" @click.stop="toggleLayer(entry.layer)" title="Toggle visibility" aria-label="Toggle layer visibility">
+                                            <i data-lucide="eye"></i>
+                                        </button>
+                                        <span class="layer-thumbnail">
+                                            <canvas width="64" height="64" :data-layer-thumbnail="entry.layer.id"></canvas>
+                                        </span>
+                                        <input
+                                            class="layer-name"
+                                            x-model="entry.layer.name"
+                                            draggable="false"
+                                            @pointerdown.stop="activeLayerId = entry.layer.id; activeGroupId = null; editingLayerId = entry.layer.id"
+                                            @focus="editingLayerId = entry.layer.id"
+                                            @blur="editingLayerId = null"
+                                            @dblclick.stop
+                                            @dragstart.stop.prevent
+                                            aria-label="Layer name"
+                                        >
+                                        <div class="layer-depth-control">
+                                            <label class="layer-value-control" title="Voxel depth">
+                                                <i data-lucide="box" aria-hidden="true"></i>
+                                                <input
+                                                    class="layer-depth"
+                                                    type="number"
+                                                    :min="layerDepthMin(entry.layer)"
+                                                    :max="layerDepthMax(entry.layer)"
+                                                    step="1"
+                                                    :value="entry.layer.depth"
+                                                    draggable="false"
+                                                    @input="setLayerDepth(entry.layer, $event.target)"
+                                                    @pointerdown.stop="beginLayerValueEdit(entry.layer, 'depth')"
+                                                    @focus="beginLayerValueEdit(entry.layer, 'depth')"
+                                                    @blur="endLayerValueEdit()"
+                                                    @dblclick.stop
+                                                    @dragstart.stop.prevent
+                                                    aria-label="Voxel depth"
+                                                >
+                                            </label>
+                                            <label class="layer-value-control" :title="`Depth offset: ${entry.layer.offset}`">
+                                                <i data-lucide="move-horizontal" aria-hidden="true"></i>
+                                                <input
+                                                    class="layer-offset"
+                                                    type="number"
+                                                    :min="layerOffsetMin(entry.layer)"
+                                                    :max="layerOffsetMax(entry.layer)"
+                                                    step="1"
+                                                    :value="entry.layer.offset"
+                                                    draggable="false"
+                                                    @input="setLayerOffset(entry.layer, $event.target)"
+                                                    @pointerdown.stop="beginLayerValueEdit(entry.layer, 'offset')"
+                                                    @focus="beginLayerValueEdit(entry.layer, 'offset')"
+                                                    @blur="endLayerValueEdit()"
+                                                    @dblclick.stop
+                                                    @dragstart.stop.prevent
+                                                    aria-label="Layer depth offset"
+                                                >
+                                            </label>
+                                        </div>
+                                    </div>
+                                </template>
                             </div>
-                        </div>
                         </template>
+                        <div class="layer-root-drop layer-root-drop-bottom" :class="{ active: layerDropTarget === 'root:bottom' }" x-show="draggedLayerWasGrouped" @dragover.prevent.stop="setRootDrop('bottom', $event)" @drop.prevent.stop="finishLayerDrag()"></div>
                     </div>
                 </section>
 
                 <section class="palette-panel">
                     <header class="palette-header">
-                        <h2>Colors</h2>
-                        <button type="button" @click="$refs.paletteInput.click()" title="Import GPL palette" aria-label="Import GPL palette">
-                            <i data-lucide="upload"></i>
-                        </button>
-                        <input x-ref="paletteInput" class="file-input" type="file" accept=".gpl,text/plain" @change="importPaletteFile($event.target.files[0]); $event.target.value = ''">
-                    </header>
-                    <div class="palette-content">
+                        <h2>Present Colors</h2>
                         <div class="palette-current">
-                            <span>Current</span>
                             <label class="color-control" title="Color">
                                 <input type="color" x-model="color" aria-label="Drawing color">
                             </label>
                         </div>
+                    </header>
+                    <div class="palette-content">
                         <div class="palette-control">
                             <div class="quantization">
                                 <span>Colors</span>
@@ -314,11 +359,26 @@
                                     <i data-lucide="check"></i>
                                 </button>
                             </div>
-                            <div class="swatches" aria-label="Color swatches">
-                                <template x-for="swatch in palette" :key="swatch">
-                                    <button type="button" class="swatch" :class="{ selected: color === swatch }" :style="`--swatch: ${swatch}`" @click="highlightPaletteColor(swatch); color = swatch; tool = 'pencil'" :title="swatch" :aria-label="`Use ${swatch}`"></button>
-                                </template>
-                            </div>
+                            <section class="palette-entry">
+                                <header class="palette-entry-header">
+                                    <select :value="activePaletteId" @change="selectPalette($event.target.value)" aria-label="Active color palette">
+                                        <option value="default">Default</option>
+                                        <template x-for="entry in importedPalettes" :key="entry.id">
+                                            <option :value="entry.id" x-text="entry.name"></option>
+                                        </template>
+                                    </select>
+                                    <button type="button" @click="$refs.paletteInput.click()" title="Import GPL palette" aria-label="Import GPL palette">
+                                        <i data-lucide="upload"></i>
+                                    </button>
+                                    <input x-ref="paletteInput" class="file-input" type="file" accept=".gpl,text/plain" @change="importPaletteFile($event.target.files[0]); $event.target.value = ''">
+                                    <span x-text="`${activePaletteColors().length} colors`"></span>
+                                </header>
+                                <div class="swatches" aria-label="Active palette swatches">
+                                    <template x-for="swatch in activePaletteColors()" :key="swatch">
+                                        <button type="button" class="swatch" :class="{ selected: color === swatch }" :style="`--swatch: ${swatch}`" @click="highlightPaletteColor(swatch); color = swatch; tool = 'pencil'" :title="swatch" :aria-label="`Use ${swatch}`"></button>
+                                    </template>
+                                </div>
+                            </section>
                         </div>
                     </div>
                 </section>

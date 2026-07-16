@@ -213,7 +213,11 @@ function quantizeImage(source, maxColors) {
 document.addEventListener("alpine:init", () => {
     Alpine.data("pixelEditor", () => {
         const canvases = new Map();
+        const transparentDragImage = document.createElement("canvas");
+        transparentDragImage.width = transparentDragImage.height = 1;
         let nextLayerId = 0;
+        let nextPaletteId = 0;
+        let nextGroupId = 0;
         let selectionAnchor = null;
         let selectionMask = null;
         let moveState = null;
@@ -273,6 +277,7 @@ document.addEventListener("alpine:init", () => {
         const voxelFaceGeometries = new Map();
         const quantizedPalettes = new Map();
         const paletteOrders = new Map();
+        const paletteSources = new Map();
         const editedViews = new Set();
 
         return {
@@ -284,6 +289,8 @@ document.addEventListener("alpine:init", () => {
             wandTolerance: 32,
             color: "#202426",
             palette: [],
+            importedPalettes: [],
+            activePaletteId: "default",
             gridVisible: false,
             verticalSymmetry: false,
             horizontalSymmetry: false,
@@ -293,10 +300,17 @@ document.addEventListener("alpine:init", () => {
             orientations: ORIENTATIONS,
             activeOrientation: "front",
             layers: [],
+            groups: [],
             activeLayerId: null,
+            activeGroupId: null,
             draggedLayerId: null,
+            draggedLayerWasGrouped: false,
+            draggedGroupId: null,
             editingLayerId: null,
+            editingGroupId: null,
             layerDragChanged: false,
+            layerDropTarget: null,
+            layerDropPosition: null,
             dropActive: false,
             selection: null,
             selectionPath: "",
@@ -930,7 +944,13 @@ document.addEventListener("alpine:init", () => {
             },
 
             markViewEdited(id = this.activeLayerId) {
-                if (this.activeOrientation !== "front") editedViews.add(this.layerViewKey(id));
+                if (this.activeOrientation === "front") {
+                    for (const orientation of ORIENTATIONS) paletteSources.delete(this.layerViewKey(id, orientation.id));
+                } else {
+                    const key = this.layerViewKey(id);
+                    editedViews.add(key);
+                    paletteSources.delete(key);
+                }
             },
 
             syncDerivedOrientations() {
@@ -1399,6 +1419,20 @@ document.addEventListener("alpine:init", () => {
                 cached.allowed.add(color);
             },
 
+            activePaletteColors() {
+                return this.palette;
+            },
+
+            selectPalette(id) {
+                this.activePaletteId = id;
+                const entry = this.importedPalettes.find((candidate) => candidate.id === id);
+                if (!entry) {
+                    this.restorePaletteSources();
+                    return;
+                }
+                this.applyPalette(entry.colors);
+            },
+
             async importPaletteFile(file) {
                 if (!file) return;
                 const lines = (await file.text()).split(/\r?\n/);
@@ -1410,12 +1444,27 @@ document.addEventListener("alpine:init", () => {
                     return [`#${channels.map((value) => value.toString(16).padStart(2, "0")).join("")}`];
                 }))].slice(0, 64);
                 if (!palette.length) return;
+                const name = lines.find((line) => /^\s*Name\s*:/i.test(line))?.replace(/^\s*Name\s*:\s*/i, "").trim()
+                    || file.name.replace(/\.[^.]+$/, "") || `Palette ${nextPaletteId + 1}`;
+                const entry = { id: `palette-${++nextPaletteId}`, name, colors: palette };
+                this.importedPalettes.push(entry);
+                this.selectPalette(entry.id);
+            },
+
+            applyPalette(palette) {
                 this.confirmQuantization();
                 const colors = palette.map(hexColor);
                 for (const layer of this.layers) for (const orientation of ORIENTATIONS) {
                     const key = viewKey(orientation.id, layer.id);
+                    if (orientation.id !== "front" && !editedViews.has(key)) continue;
                     const context = this.canvasFor(layer.id, orientation.id).getContext("2d", CANVAS_CONTEXT_OPTIONS);
-                    const image = context.getImageData(LAYER_PADDING, LAYER_PADDING, CANVAS_SIZE, CANVAS_SIZE);
+                    let source = paletteSources.get(key);
+                    if (!source) {
+                        source = context.getImageData(0, 0, LAYER_SIZE, LAYER_SIZE);
+                        paletteSources.set(key, source);
+                    }
+                    const image = context.createImageData(LAYER_SIZE, LAYER_SIZE);
+                    image.data.set(source.data);
                     for (let offset = 0; offset < image.data.length; offset += 4) {
                         if (!image.data[offset + 3]) continue;
                         const nearest = colors.reduce((best, candidate, index) => {
@@ -1424,10 +1473,23 @@ document.addEventListener("alpine:init", () => {
                         }, { index: 0, distance: Infinity }).index;
                         [image.data[offset], image.data[offset + 1], image.data[offset + 2]] = colors[nearest];
                     }
-                    context.putImageData(image, LAYER_PADDING, LAYER_PADDING);
+                    context.putImageData(image, 0, 0);
                     quantizedPalettes.set(key, { palette: [...palette], colors: palette.map(hexColor), allowed: new Set(palette), confirmed: true, locked: true });
                     paletteOrders.set(key, [...palette]);
                 }
+                this.history = [];
+                this.future = [];
+                this.render();
+                this.refreshUI();
+            },
+
+            restorePaletteSources() {
+                this.confirmQuantization();
+                for (const layer of this.layers) for (const orientation of ORIENTATIONS) {
+                    const source = paletteSources.get(viewKey(orientation.id, layer.id));
+                    if (source) this.canvasFor(layer.id, orientation.id).getContext("2d", CANVAS_CONTEXT_OPTIONS).putImageData(source, 0, 0);
+                }
+                for (const [key, cached] of quantizedPalettes) if (cached.locked) quantizedPalettes.delete(key);
                 this.history = [];
                 this.future = [];
                 this.render();
@@ -1496,19 +1558,122 @@ document.addEventListener("alpine:init", () => {
                 }
             },
 
+            layerEntries() {
+                const entries = [];
+                const groups = new Map(this.groups.map((group) => [group.id, group]));
+                const groupedIds = new Set(this.layers.map((layer) => layer.groupId).filter(Boolean));
+                const shownGroups = new Set();
+                const emptyGroups = new Map();
+                for (const group of this.groups) if (!groupedIds.has(group.id)) {
+                    const position = Math.max(0, Math.min(this.layers.length, group.position ?? 0));
+                    if (!emptyGroups.has(position)) emptyGroups.set(position, []);
+                    emptyGroups.get(position).push(group);
+                }
+                const appendEmptyGroups = (position) => {
+                    for (const group of emptyGroups.get(position) ?? []) {
+                        entries.push({ key: `group:${group.id}`, type: "group", group });
+                        shownGroups.add(group.id);
+                    }
+                };
+                for (const [index, layer] of this.layers.entries()) {
+                    appendEmptyGroups(index);
+                    const group = groups.get(layer.groupId);
+                    if (!group) {
+                        entries.push({ key: `layer:${layer.id}`, type: "layer", layer, grouped: false });
+                        continue;
+                    }
+                    if (shownGroups.has(group.id)) continue;
+                    shownGroups.add(group.id);
+                    entries.push({ key: `group:${group.id}`, type: "group", group });
+                    if (!group.collapsed) {
+                        const members = this.layers.filter((candidate) => candidate.groupId === group.id);
+                        for (const [index, member] of members.entries()) {
+                            entries.push({ key: `layer:${member.id}`, type: "layer", layer: member, grouped: true, lastInGroup: index === members.length - 1 });
+                        }
+                    }
+                }
+                appendEmptyGroups(this.layers.length);
+                return entries;
+            },
+
+            createGroup() {
+                this.pushHistory();
+                const group = { id: `group-${++nextGroupId}`, name: `Group ${nextGroupId}`, collapsed: false, position: 0 };
+                this.groups.unshift(group);
+                this.activeGroupId = group.id;
+                this.activeLayerId = null;
+                this.render();
+                this.refreshUI();
+            },
+
+            activateGroup(id) {
+                this.confirmQuantization();
+                this.activeGroupId = id;
+                this.activeLayerId = null;
+                this.render();
+            },
+
+            toggleGroup(group) {
+                group.collapsed = !group.collapsed;
+                this.refreshUI();
+            },
+
+            groupLayerCount(id) {
+                return this.layers.filter((layer) => layer.groupId === id).length;
+            },
+
+            positionEmptyGroup(id, position) {
+                if (!id || this.layers.some((layer) => layer.groupId === id)) return;
+                const group = this.groups.find((candidate) => candidate.id === id);
+                if (group) group.position = Math.max(0, Math.min(this.layers.length, position));
+            },
+
+            groupVisible(group) {
+                return this.layers.some((layer) => layer.groupId === group.id && layer.visible);
+            },
+
+            groupPartiallyVisible(group) {
+                const members = this.layers.filter((layer) => layer.groupId === group.id);
+                return members.some((layer) => layer.visible) && members.some((layer) => !layer.visible);
+            },
+
+            toggleGroupVisibility(group) {
+                const members = this.layers.filter((layer) => layer.groupId === group.id);
+                if (!members.length) return;
+                this.pushHistory();
+                const visible = !members.some((layer) => layer.visible);
+                for (const layer of members) layer.visible = visible;
+                this.render();
+            },
+
             createLayer(name) {
                 const id = `layer-${++nextLayerId}`;
                 for (const orientation of ORIENTATIONS) canvases.set(viewKey(orientation.id, id), createLayerCanvas());
+                const activePalette = this.importedPalettes.find((entry) => entry.id === this.activePaletteId)?.colors;
+                if (activePalette) for (const orientation of ORIENTATIONS) {
+                    const key = viewKey(orientation.id, id);
+                    quantizedPalettes.set(key, { palette: [...activePalette], colors: activePalette.map(hexColor), allowed: new Set(activePalette), confirmed: true, locked: true });
+                    paletteOrders.set(key, [...activePalette]);
+                }
                 const source = this.layers[0];
                 const offset = source ? layerOffset(source) : 0;
-                return { id, name: name || `Layer ${nextLayerId}`, visible: true, depth: source ? clampLayerDepth(source, offset) : 1, offset };
+                return { id, name: name || `Layer ${nextLayerId}`, visible: true, depth: source ? clampLayerDepth(source, offset) : 1, offset, groupId: null };
             },
 
             addLayer(name, record = true) {
                 if (record) this.pushHistory();
                 const layer = this.createLayer(name);
-                this.layers.unshift(layer);
+                const group = this.groups.find((candidate) => candidate.id === this.activeGroupId);
+                if (group) {
+                    layer.groupId = group.id;
+                    group.collapsed = false;
+                }
+                const groupIndex = group ? this.layers.findIndex((candidate) => candidate.groupId === group.id) : -1;
+                if (groupIndex >= 0) this.layers.splice(groupIndex, 0, layer);
+                else if (group) this.layers.splice(Math.max(0, Math.min(this.layers.length, group.position ?? 0)), 0, layer);
+                else this.layers.unshift(layer);
                 this.activeLayerId = layer.id;
+                this.activeGroupId = null;
                 this.render();
                 this.refreshUI();
                 return layer;
@@ -1526,6 +1691,7 @@ document.addEventListener("alpine:init", () => {
                 copy.visible = source.visible;
                 copy.depth = layerDepth(source);
                 copy.offset = source.offset;
+                copy.groupId = source.groupId ?? null;
                 for (const orientation of ORIENTATIONS) {
                     const sourceKey = viewKey(orientation.id, source.id);
                     const copyKey = viewKey(orientation.id, copy.id);
@@ -1542,25 +1708,46 @@ document.addEventListener("alpine:init", () => {
                 this.layers.splice(index, 0, copy);
                 this.normalizeLayerOffsets();
                 this.activeLayerId = copy.id;
+                this.activeGroupId = null;
                 this.render();
                 this.refreshUI();
             },
 
             removeLayer() {
-                if (this.layers.length <= 1) return;
+                if (!this.activeLayerId || this.layers.length <= 1) return;
                 this.pushHistory();
                 const index = this.layers.findIndex((layer) => layer.id === this.activeLayerId);
+                const groupId = this.layers[index].groupId;
                 for (const orientation of ORIENTATIONS) {
                     const key = viewKey(orientation.id, this.activeLayerId);
                     canvases.delete(key);
                     quantizedPalettes.delete(key);
                     paletteOrders.delete(key);
+                    paletteSources.delete(key);
                     editedViews.delete(key);
                 }
                 this.layers.splice(index, 1);
+                this.positionEmptyGroup(groupId, index);
                 this.normalizeLayerOffsets();
                 this.activeLayerId = this.layers[Math.min(index, this.layers.length - 1)].id;
+                this.activeGroupId = null;
                 this.render();
+            },
+
+            removeLayerOrGroup() {
+                if (!this.activeGroupId) {
+                    this.removeLayer();
+                    return;
+                }
+                const index = this.groups.findIndex((group) => group.id === this.activeGroupId);
+                if (index < 0) return;
+                this.pushHistory();
+                for (const layer of this.layers) if (layer.groupId === this.activeGroupId) layer.groupId = null;
+                this.groups.splice(index, 1);
+                this.activeGroupId = null;
+                this.activeLayerId = this.layers[0]?.id ?? null;
+                this.render();
+                this.refreshUI();
             },
 
             toggleLayer(layer) {
@@ -1610,6 +1797,7 @@ document.addEventListener("alpine:init", () => {
 
             beginLayerValueEdit(layer, field) {
                 this.activeLayerId = layer.id;
+                this.activeGroupId = null;
                 this.editingLayerId = layer.id;
                 if (layerValueEdit?.id !== layer.id || layerValueEdit.field !== field) layerValueEdit = { id: layer.id, field, recorded: false };
             },
@@ -1651,32 +1839,296 @@ document.addEventListener("alpine:init", () => {
                     return;
                 }
                 this.draggedLayerId = id;
+                this.draggedLayerWasGrouped = !!this.layers.find((layer) => layer.id === id)?.groupId;
+                this.draggedGroupId = null;
                 this.layerDragChanged = false;
                 event.dataTransfer.effectAllowed = "move";
                 event.dataTransfer.setData("text/plain", id);
+                event.dataTransfer.setDragImage(transparentDragImage, 0, 0);
             },
 
-            reorderLayer(targetId, event) {
-                if (!this.draggedLayerId || this.draggedLayerId === targetId) return;
-                const from = this.layers.findIndex((layer) => layer.id === this.draggedLayerId);
-                const target = this.layers.findIndex((layer) => layer.id === targetId);
+            beginGroupDrag(id, event) {
+                if (this.editingGroupId === id) {
+                    event.preventDefault();
+                    return;
+                }
+                this.draggedLayerId = null;
+                this.draggedLayerWasGrouped = false;
+                this.draggedGroupId = id;
+                this.layerDragChanged = false;
+                event.dataTransfer.effectAllowed = "move";
+                event.dataTransfer.setData("text/plain", id);
+                event.dataTransfer.setDragImage(transparentDragImage, 0, 0);
+            },
+
+            setLayerDrop(targetId, event) {
+                if ((!this.draggedLayerId && !this.draggedGroupId) || this.draggedLayerId === targetId) return;
+                const target = this.layers.find((layer) => layer.id === targetId);
+                if (this.draggedGroupId && target?.groupId === this.draggedGroupId) {
+                    this.layerDropTarget = null;
+                    this.layerDropPosition = null;
+                    return;
+                }
                 const bounds = event.currentTarget.getBoundingClientRect();
-                let to = target + (event.clientY > bounds.top + bounds.height * 0.5 ? 1 : 0);
-                if (from < to) to--;
-                if (from === to) return;
+                const position = event.clientY < bounds.top + bounds.height / 2 ? "before" : "after";
+                const dragged = this.layers.find((layer) => layer.id === this.draggedLayerId);
+                const members = target?.groupId ? this.layers.filter((layer) => layer.groupId === target.groupId) : [];
+                const boundary = (position === "before" && target === members[0]) || (position === "after" && target === members.at(-1));
+                const outdented = dragged?.groupId === target?.groupId && event.clientX < bounds.left + 34;
+                const outside = !!(dragged && target?.groupId && boundary && (dragged.groupId !== target.groupId || outdented));
+                this.layerDropTarget = `layer:${targetId}`;
+                this.layerDropPosition = outside ? `${position}-group` : position;
+                event.dataTransfer.dropEffect = "move";
+                this.dropOnLayer(targetId, false);
+            },
+
+            setGroupDrop(targetId, event) {
+                if ((!this.draggedLayerId && !this.draggedGroupId) || this.draggedGroupId === targetId) return;
+                const bounds = event.currentTarget.getBoundingClientRect();
+                const ratio = (event.clientY - bounds.top) / bounds.height;
+                this.layerDropTarget = `group:${targetId}`;
+                this.layerDropPosition = this.draggedLayerId && ratio >= 0.34 && ratio <= 0.66
+                    ? "inside"
+                    : ratio < 0.5 ? "before" : "after";
+                event.dataTransfer.dropEffect = "move";
+                this.dropOnGroup(targetId, false);
+            },
+
+            setRootDrop(position, event) {
+                if (!this.draggedLayerId || !this.draggedLayerWasGrouped) return;
+                this.layerDropTarget = `root:${position}`;
+                this.layerDropPosition = "outside";
+                event.dataTransfer.dropEffect = "move";
+                this.moveDraggedLayerToRoot(position, false);
+            },
+
+            recordLayerDrag() {
                 if (!this.layerDragChanged) {
                     this.pushHistory();
                     this.layerDragChanged = true;
                 }
-                const [layer] = this.layers.splice(from, 1);
-                this.layers.splice(to, 0, layer);
+            },
+
+            captureLayerPositions() {
+                const positions = new Map();
+                for (const entry of this.$root.querySelectorAll("[data-layer-entry]")) {
+                    positions.set(entry.dataset.layerEntry, entry.getBoundingClientRect());
+                    for (const animation of entry.getAnimations()) animation.cancel();
+                }
+                return positions;
+            },
+
+            animateLayerPositions(positions) {
+                if (matchMedia("(prefers-reduced-motion: reduce)").matches) return;
+                this.$nextTick(() => {
+                    for (const entry of this.$root.querySelectorAll("[data-layer-entry]")) {
+                        const previous = positions.get(entry.dataset.layerEntry);
+                        if (!previous) continue;
+                        const current = entry.getBoundingClientRect();
+                        const x = previous.left - current.left;
+                        const y = previous.top - current.top;
+                        if (!x && !y) continue;
+                        entry.animate([
+                            { transform: `translate(${x}px, ${y}px)` },
+                            { transform: "translate(0, 0)" },
+                        ], { duration: 180, easing: "cubic-bezier(0.2, 0.8, 0.2, 1)" });
+                    }
+                });
+            },
+
+            dropOnLayer(targetId, finish = true) {
+                const target = this.layers.find((layer) => layer.id === targetId);
+                if (!target) {
+                    if (finish) this.finishLayerDrag();
+                    return;
+                }
+                if (this.draggedGroupId) {
+                    this.moveDraggedGroup("layer", targetId, this.layerDropPosition);
+                    if (finish) this.finishLayerDrag();
+                    return;
+                }
+                const layer = this.layers.find((candidate) => candidate.id === this.draggedLayerId);
+                if (!layer || layer === target) {
+                    if (finish) this.finishLayerDrag();
+                    return;
+                }
+                const outside = this.layerDropPosition?.endsWith("-group");
+                const desiredGroupId = outside ? null : target.groupId ?? null;
+                const from = this.layers.indexOf(layer);
+                const targetIndex = this.layers.indexOf(target);
+                const adjacent = this.layerDropPosition?.startsWith("after") ? from === targetIndex + 1 : from === targetIndex - 1;
+                if (layer.groupId === desiredGroupId && adjacent) {
+                    if (finish) this.finishLayerDrag();
+                    return;
+                }
+                this.recordLayerDrag();
+                const positions = this.captureLayerPositions();
+                const previousGroupId = layer.groupId;
+                this.layers.splice(from, 1);
+                const nextTargetIndex = this.layers.indexOf(target);
+                layer.groupId = desiredGroupId;
+                this.layers.splice(nextTargetIndex + (this.layerDropPosition?.startsWith("after") ? 1 : 0), 0, layer);
+                this.positionEmptyGroup(previousGroupId, from);
+                this.activeGroupId = null;
                 this.normalizeLayerOffsets();
                 this.render();
+                this.refreshUI();
+                this.animateLayerPositions(positions);
+                if (finish) this.finishLayerDrag();
+            },
+
+            dropOnGroup(targetId, finish = true) {
+                if (this.draggedGroupId) {
+                    this.moveDraggedGroup("group", targetId, this.layerDropPosition);
+                    if (finish) this.finishLayerDrag();
+                    return;
+                }
+                const layer = this.layers.find((candidate) => candidate.id === this.draggedLayerId);
+                const group = this.groups.find((candidate) => candidate.id === targetId);
+                if (!layer || !group) {
+                    if (finish) this.finishLayerDrag();
+                    return;
+                }
+                const currentMembers = this.layers.filter((candidate) => candidate.groupId === targetId);
+                const layerIndex = this.layers.indexOf(layer);
+                const firstIndex = currentMembers.length ? this.layers.indexOf(currentMembers[0]) : 0;
+                const lastIndex = currentMembers.length ? this.layers.indexOf(currentMembers.at(-1)) : -1;
+                const settled = this.layerDropPosition === "inside"
+                    ? layer.groupId === targetId && layer === currentMembers.at(-1) && !group.collapsed
+                    : !layer.groupId && (this.layerDropPosition === "before" ? layerIndex === firstIndex - 1 : layerIndex === lastIndex + 1);
+                if (settled) {
+                    if (finish) this.finishLayerDrag();
+                    return;
+                }
+                this.recordLayerDrag();
+                const positions = this.captureLayerPositions();
+                const previousGroupId = layer.groupId;
+                const previousIndex = this.layers.indexOf(layer);
+                this.layers.splice(this.layers.indexOf(layer), 1);
+                const memberIndexes = this.layers
+                    .map((candidate, index) => candidate.groupId === targetId ? index : -1)
+                    .filter((index) => index >= 0);
+                if (this.layerDropPosition === "inside") {
+                    layer.groupId = targetId;
+                    this.layers.splice(memberIndexes.length ? memberIndexes.at(-1) + 1 : Math.max(0, Math.min(this.layers.length, group.position ?? 0)), 0, layer);
+                    group.collapsed = false;
+                } else {
+                    layer.groupId = null;
+                    const index = memberIndexes.length
+                        ? this.layerDropPosition === "before" ? memberIndexes[0] : memberIndexes.at(-1) + 1
+                        : Math.max(0, Math.min(this.layers.length, group.position ?? 0));
+                    this.layers.splice(index, 0, layer);
+                    if (!memberIndexes.length) group.position = index + (this.layerDropPosition === "before" ? 1 : 0);
+                }
+                if (previousGroupId !== targetId) this.positionEmptyGroup(previousGroupId, previousIndex);
+                this.activeGroupId = null;
+                this.normalizeLayerOffsets();
+                this.render();
+                this.refreshUI();
+                this.animateLayerPositions(positions);
+                if (finish) this.finishLayerDrag();
+            },
+
+            moveDraggedGroup(targetType, targetId, position) {
+                const groupId = this.draggedGroupId;
+                if (!groupId || (targetType === "group" && groupId === targetId)) return;
+                const targetLayer = targetType === "layer" ? this.layers.find((layer) => layer.id === targetId) : null;
+                if (targetLayer?.groupId === groupId) return;
+                const members = this.layers.filter((layer) => layer.groupId === groupId);
+                const firstMemberIndex = members.length ? this.layers.indexOf(members[0]) : -1;
+                const lastMemberIndex = members.length ? this.layers.indexOf(members.at(-1)) : -1;
+                let firstTargetIndex = -1;
+                let lastTargetIndex = -1;
+                if (targetType === "group") {
+                    const targetMembers = this.layers.filter((layer) => layer.groupId === targetId);
+                    if (targetMembers.length) {
+                        firstTargetIndex = this.layers.indexOf(targetMembers[0]);
+                        lastTargetIndex = this.layers.indexOf(targetMembers.at(-1));
+                    }
+                } else if (targetLayer) {
+                    const targetMembers = targetLayer.groupId ? this.layers.filter((layer) => layer.groupId === targetLayer.groupId) : [targetLayer];
+                    firstTargetIndex = this.layers.indexOf(targetMembers[0]);
+                    lastTargetIndex = this.layers.indexOf(targetMembers.at(-1));
+                }
+                const targetGroup = targetType === "group" ? this.groups.find((group) => group.id === targetId) : null;
+                const emptyPosition = firstTargetIndex >= 0
+                    ? position === "before" ? firstTargetIndex : lastTargetIndex + 1
+                    : Math.max(0, Math.min(this.layers.length, targetGroup?.position ?? 0));
+                if (members.length && firstTargetIndex >= 0) {
+                    const settled = position === "before" ? lastMemberIndex + 1 === firstTargetIndex : lastTargetIndex + 1 === firstMemberIndex;
+                    if (settled) return;
+                } else if (!members.length && this.groups.find((group) => group.id === groupId)?.position === emptyPosition) {
+                    if (targetType !== "group") return;
+                    const from = this.groups.findIndex((group) => group.id === groupId);
+                    const to = this.groups.findIndex((group) => group.id === targetId);
+                    if (position === "before" ? from === to - 1 : from === to + 1) return;
+                }
+                this.recordLayerDrag();
+                const positions = this.captureLayerPositions();
+                this.layers = this.layers.filter((layer) => layer.groupId !== groupId);
+                let targetIndexes = [];
+                if (targetType === "group") {
+                    targetIndexes = this.layers.map((layer, index) => layer.groupId === targetId ? index : -1).filter((index) => index >= 0);
+                    const from = this.groups.findIndex((group) => group.id === groupId);
+                    const to = this.groups.findIndex((group) => group.id === targetId);
+                    if (from >= 0 && to >= 0) {
+                        const [group] = this.groups.splice(from, 1);
+                        const targetIndex = this.groups.findIndex((candidate) => candidate.id === targetId);
+                        this.groups.splice(targetIndex + (position === "after" ? 1 : 0), 0, group);
+                    }
+                } else if (targetLayer) {
+                    const targetGroupId = targetLayer.groupId;
+                    targetIndexes = targetGroupId
+                        ? this.layers.map((layer, index) => layer.groupId === targetGroupId ? index : -1).filter((index) => index >= 0)
+                        : [this.layers.indexOf(targetLayer)];
+                }
+                const index = targetIndexes.length
+                    ? position === "before" ? targetIndexes[0] : targetIndexes.at(-1) + 1
+                    : emptyPosition;
+                if (members.length) this.layers.splice(index, 0, ...members);
+                else this.groups.find((group) => group.id === groupId).position = index;
+                this.activeGroupId = groupId;
+                this.activeLayerId = null;
+                this.normalizeLayerOffsets();
+                this.render();
+                this.refreshUI();
+                this.animateLayerPositions(positions);
+            },
+
+            moveDraggedLayerToRoot(position, finish = true) {
+                const layer = this.layers.find((candidate) => candidate.id === this.draggedLayerId);
+                if (!layer) {
+                    if (finish) this.finishLayerDrag();
+                    return;
+                }
+                const currentIndex = this.layers.indexOf(layer);
+                if (!layer.groupId && (position === "top" ? currentIndex === 0 : currentIndex === this.layers.length - 1)) {
+                    if (finish) this.finishLayerDrag();
+                    return;
+                }
+                this.recordLayerDrag();
+                const positions = this.captureLayerPositions();
+                const previousGroupId = layer.groupId;
+                this.layers.splice(this.layers.indexOf(layer), 1);
+                layer.groupId = null;
+                this.layers.splice(position === "top" ? 0 : this.layers.length, 0, layer);
+                this.positionEmptyGroup(previousGroupId, currentIndex);
+                this.activeGroupId = null;
+                this.activeLayerId = layer.id;
+                this.normalizeLayerOffsets();
+                this.render();
+                this.refreshUI();
+                this.animateLayerPositions(positions);
+                if (finish) this.finishLayerDrag();
             },
 
             finishLayerDrag() {
                 this.draggedLayerId = null;
+                this.draggedLayerWasGrouped = false;
+                this.draggedGroupId = null;
                 this.layerDragChanged = false;
+                this.layerDropTarget = null;
+                this.layerDropPosition = null;
             },
 
             orientationRotation(id = this.activeOrientation) {
@@ -1803,6 +2255,7 @@ document.addEventListener("alpine:init", () => {
             activateLayer(id) {
                 this.confirmQuantization();
                 this.activeLayerId = id;
+                this.activeGroupId = null;
                 this.render();
             },
 
@@ -2350,8 +2803,10 @@ document.addEventListener("alpine:init", () => {
 
             snapshot() {
                 return Alpine.raw({
-                    layers: this.layers.map(({ id, name, visible, depth, offset }) => ({ id, name, visible, depth, offset })),
+                    layers: this.layers.map(({ id, name, visible, depth, offset, groupId }) => ({ id, name, visible, depth, offset, groupId })),
+                    groups: this.groups.map((group) => ({ ...group })),
                     activeLayerId: this.activeLayerId,
+                    activeGroupId: this.activeGroupId,
                     editedViews: [...editedViews],
                     selectionMask: selectionMask ? new Uint8Array(selectionMask) : null,
                     pixels: ORIENTATIONS.flatMap((orientation) => this.layers.map(({ id }) => ({
@@ -2364,14 +2819,17 @@ document.addEventListener("alpine:init", () => {
             restore(snapshot) {
                 snapshot = Alpine.raw(snapshot);
                 canvases.clear();
+                paletteSources.clear();
                 for (const pixels of snapshot.pixels) {
                     const canvas = createLayerCanvas();
                     canvas.getContext("2d").putImageData(pixels.data, 0, 0);
                     canvases.set(pixels.key, canvas);
                 }
                 this.layers = snapshot.layers.map((layer) => ({ ...layer, depth: layerDepth(layer), offset: layerOffset(layer) }));
+                this.groups = (snapshot.groups ?? []).map((group) => ({ ...group }));
                 this.normalizeLayerOffsets();
                 this.activeLayerId = snapshot.activeLayerId;
+                this.activeGroupId = this.groups.some((group) => group.id === snapshot.activeGroupId) ? snapshot.activeGroupId : null;
                 editedViews.clear();
                 for (const key of snapshot.editedViews ?? []) editedViews.add(key);
                 if (snapshot.selectionMask) this.setSelectionMask(new Uint8Array(snapshot.selectionMask));
@@ -2497,11 +2955,12 @@ document.addEventListener("alpine:init", () => {
                     run(() => this.clearSelection());
                     return;
                 }
+                if (!command && !event.altKey && event.target.closest?.("input, textarea, select, [contenteditable]")) return;
                 if (event.key === "Escape") {
                     run(() => this.clearSelection());
                     return;
                 }
-                if (event.key === "Delete" || event.key === "Backspace") {
+                if (event.key === "Delete") {
                     run(() => this.clearCanvas());
                     return;
                 }
@@ -2517,7 +2976,6 @@ document.addEventListener("alpine:init", () => {
                     return;
                 }
                 if (command || event.altKey) return;
-                if (event.target.closest?.("input, textarea, [contenteditable]")) return;
                 const tools = { b: "pencil", g: "bucket", i: "eyedropper", t: "selection", m: "move", w: "wand", e: "eraser" };
                 const tool = tools[key];
                 if (tool) run(() => { this.tool = tool; });

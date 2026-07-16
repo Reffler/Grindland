@@ -98,7 +98,8 @@ button.active {
 }
 
 button:focus-visible,
-input:focus-visible {
+input:focus-visible,
+select:focus-visible {
     outline: 2px solid #68dcea;
     outline-offset: 2px;
 }
@@ -186,6 +187,51 @@ button svg {
     gap: 10px;
 }
 
+.palette-entry {
+    padding: 8px;
+    border: 1px solid #34383c;
+    border-radius: 5px;
+    background: #17191b;
+}
+
+.palette-entry-header {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 8px;
+    color: #b8bdc0;
+    font-size: 11px;
+    font-weight: 600;
+}
+
+.palette-entry-header select {
+    min-width: 0;
+    flex: 1;
+    padding: 5px 7px;
+    border: 1px solid #4b5155;
+    border-radius: 3px;
+    background: #24282b;
+    color: #f4f5f5;
+    font: inherit;
+}
+
+.palette-entry-header button {
+    width: 28px;
+    height: 28px;
+    flex: 0 0 auto;
+}
+
+.palette-entry-header button svg {
+    width: 15px;
+    height: 15px;
+}
+
+.palette-entry-header span:last-child {
+    color: #777f84;
+    font-size: 10px;
+    font-weight: 400;
+}
+
 .quantization {
     display: grid;
     grid-template-columns: auto minmax(60px, 1fr) 22px 24px;
@@ -271,15 +317,14 @@ button svg {
 .palette-current {
     display: flex;
     align-items: center;
-    justify-content: space-between;
-    margin-bottom: 10px;
+    gap: 6px;
     color: #b8bdc0;
     font-size: 12px;
     font-weight: 600;
 }
 
 .palette-panel .swatches {
-    min-height: 62px;
+    min-height: 30px;
     display: grid;
     grid-template-columns: repeat(auto-fill, 24px);
     align-content: start;
@@ -595,18 +640,158 @@ button svg {
 }
 
 .layers-list {
+    position: relative;
     min-height: 0;
     overflow-y: auto;
     padding: 6px;
 }
 
+.layer-group-row {
+    position: relative;
+    height: 42px;
+    display: flex;
+    align-items: center;
+    gap: 4px;
+    padding: 4px 7px 4px 3px;
+    border: 1px solid transparent;
+    border-radius: 4px;
+    color: #c9cdcf;
+    cursor: grab;
+}
+
+.layer-group-row:hover {
+    background: #24282b;
+}
+
+.layer-group-row.active {
+    border-color: #477e75;
+    background: #263c38;
+}
+
+.group-visibility {
+    width: 28px;
+    height: 28px;
+    flex: 0 0 28px;
+}
+
+.group-visibility.partial {
+    color: #75ead4;
+    opacity: 0.7;
+}
+
+.group-toggle {
+    width: 24px;
+    height: 24px;
+    flex: 0 0 24px;
+}
+
+.group-toggle svg {
+    width: 15px;
+    height: 15px;
+    transition: transform 120ms ease;
+}
+
+.group-toggle.expanded svg {
+    transform: rotate(90deg);
+}
+
+.group-icon {
+    width: 17px;
+    height: 17px;
+    flex: 0 0 17px;
+    color: #92999d;
+}
+
+.layer-group-row .group-name {
+    width: auto;
+    flex: 1 1 auto;
+    font-weight: 600;
+    cursor: text;
+}
+
+.layer-group-row .group-name[readonly] {
+    cursor: grab;
+    user-select: none;
+}
+
+.layer-group-row.drop-inside {
+    border-color: #55d6be;
+    background: #263c38;
+    box-shadow: inset 0 0 0 1px rgb(85 214 190 / 20%);
+}
+
+.layer-group-row.drop-inside .group-icon {
+    color: #75ead4;
+}
+
+.layer-group-row.drop-inside .group-name {
+    opacity: 0.18;
+}
+
+.layer-group-row.drop-inside::after {
+    position: absolute;
+    right: 10px;
+    color: #75ead4;
+    content: "Drop into group";
+    font-size: 10px;
+    font-weight: 700;
+    pointer-events: none;
+}
+
+.layer-root-drop {
+    position: absolute;
+    z-index: 30;
+    right: 8px;
+    left: 8px;
+    height: 14px;
+    color: transparent;
+}
+
+.layer-root-drop-top {
+    top: 0;
+}
+
+.layer-root-drop-bottom {
+    bottom: 0;
+}
+
+.layer-root-drop::before {
+    position: absolute;
+    top: 6px;
+    right: 2px;
+    left: 1px;
+    height: 2px;
+    border-radius: 2px;
+    background: #477e75;
+    content: "";
+}
+
+.layer-root-drop::after {
+    position: absolute;
+    top: 2px;
+    left: -5px;
+    border-top: 5px solid transparent;
+    border-bottom: 5px solid transparent;
+    border-left: 7px solid #477e75;
+    content: "";
+}
+
+.layer-root-drop.active::before {
+    background: #75ead4;
+}
+
+.layer-root-drop.active::after {
+    border-left-color: #75ead4;
+}
+
 .layer-row {
-    height: 64px;
+    position: relative;
+    height: 70px;
     display: grid;
-    grid-template-columns: 18px 28px 42px minmax(0, 1fr) 44px;
+    grid-template-columns: 28px 42px minmax(0, 1fr) 62px;
     align-items: center;
     gap: 6px;
-    padding: 5px 7px 5px 3px;
+    padding: 5px 7px;
     border: 1px solid transparent;
     border-radius: 4px;
     cursor: default;
@@ -621,14 +806,36 @@ button svg {
     background: #263c38;
 }
 
-.layer-row.dragging {
-    opacity: 0.42;
+.layer-row.grouped {
+    width: 100%;
+    margin-left: 0;
 }
 
-.drag-handle {
-    width: 17px;
-    color: #72797d;
-    cursor: grab;
+.group-member-entry {
+    position: relative;
+    padding-left: 14px;
+}
+
+.group-member-entry::before {
+    position: absolute;
+    top: 0;
+    bottom: 0;
+    left: 6px;
+    border-left: 1px solid #43494d;
+    content: "";
+}
+
+.group-member-entry::after {
+    position: absolute;
+    top: 50%;
+    left: 6px;
+    width: 8px;
+    border-top: 1px solid #43494d;
+    content: "";
+}
+
+.group-member-entry.last-group-member::before {
+    bottom: 50%;
 }
 
 .visibility {
@@ -684,8 +891,8 @@ button svg {
 .layer-depth,
 .layer-offset {
     min-width: 0;
-    width: 44px;
-    padding: 5px 3px;
+    width: 100%;
+    padding: 5px 2px 5px 20px;
     border: 1px solid #4b5155;
     border-radius: 3px;
     background: #17191b;
@@ -695,9 +902,26 @@ button svg {
 }
 
 .layer-depth-control {
-    width: 44px;
+    width: 62px;
     display: grid;
     gap: 2px;
+}
+
+.layer-value-control {
+    position: relative;
+    min-width: 0;
+}
+
+.layer-value-control svg {
+    position: absolute;
+    z-index: 1;
+    top: 50%;
+    left: 5px;
+    width: 12px;
+    height: 12px;
+    color: #777f84;
+    pointer-events: none;
+    transform: translateY(-50%);
 }
 
 .pixel-grid {
@@ -778,16 +1002,8 @@ button svg {
         padding: 16px;
     }
 
-    .palette-content {
-        display: grid;
-        grid-template-columns: auto minmax(0, 1fr);
-        align-items: start;
-        gap: 12px;
-    }
-
     .palette-current {
         gap: 10px;
-        margin-bottom: 0;
     }
 
     .palette-panel .swatches {
