@@ -6,10 +6,11 @@
     <meta http-equiv="Cache-Control" content="no-cache, no-store, must-revalidate">
     <meta http-equiv="Pragma" content="no-cache">
     <meta http-equiv="Expires" content="0">
+    <link rel="icon" href="data:,">
     <title>Model Editor</title>
-    <link rel="stylesheet" href="styles.css?v=20260715-10">
+    <link rel="stylesheet" href="styles.css?v=20260715-25">
     <script defer src="https://unpkg.com/lucide@0.468.0/dist/umd/lucide.min.js"></script>
-    <script defer src="editor.js?v=20260715-13"></script>
+    <script defer src="editor.js?v=20260715-56"></script>
     <script defer src="https://cdn.jsdelivr.net/npm/alpinejs@3.x.x/dist/cdn.min.js"></script>
 </head>
 <body>
@@ -50,30 +51,6 @@
                     <input type="number" min="0" max="255" x-model.number="wandTolerance" aria-label="Magic Wand tolerance value">
                 </label>
 
-                <div class="tool-group">
-                    <button type="button" @click="undo()" :disabled="history.length === 0" title="Undo" aria-label="Undo">
-                        <i data-lucide="undo-2"></i>
-                    </button>
-                    <button type="button" @click="redo()" :disabled="future.length === 0" title="Redo" aria-label="Redo">
-                        <i data-lucide="redo-2"></i>
-                    </button>
-                    <button type="button" :class="{ active: gridVisible }" @click="gridVisible = !gridVisible" title="Toggle grid" aria-label="Toggle grid">
-                        <i data-lucide="grid-3x3"></i>
-                    </button>
-                    <button type="button" :class="{ active: verticalSymmetry }" @click="verticalSymmetry = !verticalSymmetry; renderVoxelCursor()" title="Vertical symmetry" aria-label="Toggle vertical symmetry">
-                        <i data-lucide="flip-horizontal-2"></i>
-                    </button>
-                    <button type="button" :class="{ active: horizontalSymmetry }" @click="horizontalSymmetry = !horizontalSymmetry; renderVoxelCursor()" title="Horizontal symmetry" aria-label="Toggle horizontal symmetry">
-                        <i data-lucide="flip-vertical-2"></i>
-                    </button>
-                    <button type="button" @click="download()" title="Export PNG" aria-label="Export PNG">
-                        <i data-lucide="download"></i>
-                    </button>
-                    <button type="button" @click="$refs.fileInput.click()" title="Open image" aria-label="Open image">
-                        <i data-lucide="image-plus"></i>
-                    </button>
-                    <input x-ref="fileInput" class="file-input" type="file" accept="image/*" multiple @change="importFiles($event.target.files); $event.target.value = ''">
-                </div>
             </nav>
         </header>
 
@@ -87,6 +64,40 @@
                 @drop.prevent="handleDrop($event)"
             >
                 <div class="workspace-content">
+                    <div class="canvas-controls">
+                        <div class="orientation-tabs" role="tablist" aria-label="Model orientation">
+                            <template x-for="orientation in orientations" :key="orientation.id">
+                                <button
+                                    type="button"
+                                    role="tab"
+                                    :class="{ active: activeOrientation === orientation.id }"
+                                    :aria-selected="activeOrientation === orientation.id"
+                                    @click="switchOrientation(orientation.id)"
+                                    x-text="orientation.label"
+                                ></button>
+                            </template>
+                        </div>
+                        <div class="canvas-actions">
+                            <button type="button" @click="undo()" :disabled="history.length === 0" title="Undo" aria-label="Undo">
+                                <i data-lucide="undo-2"></i>
+                            </button>
+                            <button type="button" @click="redo()" :disabled="future.length === 0" title="Redo" aria-label="Redo">
+                                <i data-lucide="redo-2"></i>
+                            </button>
+                            <button type="button" :class="{ active: gridVisible }" @click="gridVisible = !gridVisible" title="Toggle grid" aria-label="Toggle grid">
+                                <i data-lucide="grid-3x3"></i>
+                            </button>
+                            <button type="button" :class="{ active: verticalSymmetry }" @click="verticalSymmetry = !verticalSymmetry; renderVoxelCursor()" title="Vertical symmetry" aria-label="Toggle vertical symmetry">
+                                <i data-lucide="flip-horizontal-2"></i>
+                            </button>
+                            <button type="button" :class="{ active: horizontalSymmetry }" @click="horizontalSymmetry = !horizontalSymmetry; renderVoxelCursor()" title="Horizontal symmetry" aria-label="Toggle horizontal symmetry">
+                                <i data-lucide="flip-vertical-2"></i>
+                            </button>
+                            <button type="button" @click="download()" title="Export PNG" aria-label="Export PNG">
+                                <i data-lucide="download"></i>
+                            </button>
+                        </div>
+                    </div>
                     <div class="canvas-frame">
                         <canvas
                             x-ref="canvas"
@@ -98,11 +109,15 @@
                             @pointerup.window="endPointer($event)"
                             @pointercancel.window="endPointer($event)"
                             @pointerleave="clearHover()"
+                            @mousedown.middle.prevent
                             @auxclick.prevent
                             @contextmenu.prevent
                             aria-label="64 by 64 pixel drawing canvas"
                         ></canvas>
                         <canvas x-ref="voxelCanvas" class="voxel-canvas" aria-hidden="true"></canvas>
+                        <canvas x-ref="horizontalRuler" class="canvas-ruler ruler-horizontal" aria-hidden="true"></canvas>
+                        <canvas x-ref="verticalRuler" class="canvas-ruler ruler-vertical" aria-hidden="true"></canvas>
+                        <div class="ruler-corner" aria-hidden="true"></div>
                         <canvas x-ref="paletteHighlight" class="palette-highlight" width="64" height="64" x-show="!voxelReady" aria-hidden="true"></canvas>
                         <div class="pixel-grid" x-show="gridVisible && !voxelReady" aria-hidden="true"></div>
                         <div class="center-guide center-guide-x" x-show="centerGuideX || verticalSymmetry" aria-hidden="true"></div>
@@ -122,48 +137,43 @@
                         ></div>
                         <div class="pixel-cursor" x-show="hoverPoint && !voxelReady" :style="hoverStyle()" aria-hidden="true"></div>
                     </div>
-                    <div class="canvas-zoom" :class="{ 'rotation-hidden': voxelRotating }">
-                        <label>
-                            <span>Zoom</span>
-                            <input type="range" min="0.5" max="4" step="0.1" :value="voxelZoom" @input="setVoxelZoom($event.target.value)" aria-label="Canvas zoom">
-                            <output x-text="`${voxelZoom.toFixed(1)}x`"></output>
-                        </label>
-                        <div class="zoom-steps" aria-hidden="true">
-                            <span>0.5</span><span>1</span><span>1.5</span><span>2</span><span>2.5</span><span>3</span><span>3.5</span><span>4</span>
-                        </div>
+                    <div class="canvas-zoom">
+                        <output x-text="`${voxelZoom.toFixed(1)}x`" aria-label="Canvas zoom"></output>
                     </div>
-                    <div class="future-window" :class="{ 'rotation-hidden': voxelRotating }">
-                        <canvas
-                            x-ref="previewCanvas"
-                            class="model-preview"
-                            @pointerdown="startPreviewDrag($event)"
-                            @pointermove="continuePreviewDrag($event)"
-                            @pointerup.window="endPreviewDrag($event)"
-                            @pointercancel.window="endPreviewDrag($event)"
-                            @auxclick.prevent
-                            @contextmenu.prevent
-                            aria-label="Pannable, rotatable, and zoomable model preview"
-                        ></canvas>
+                    <div class="preview-column">
                         <div class="preview-presets" role="group" aria-label="Preview controls">
-                            <button type="button" @click="resetPreviewPosition()" title="Return to origin" aria-label="Return preview to origin">
+                            <button type="button" class="preview-origin" @click="resetPreviewPosition()" title="Return to origin" aria-label="Return preview to origin">
                                 <i data-lucide="crosshair"></i>
                             </button>
-                            <button type="button" @click="setPreviewView('perspective')" title="Perspective view" aria-label="Perspective view">
+                            <button type="button" :class="{ active: previewPreset === 'perspective' }" @click="setPreviewView('perspective')" title="Perspective view" aria-label="Perspective view">
                                 <i data-lucide="box"></i>
                             </button>
-                            <button type="button" @click="setPreviewView('front')" title="Front view" aria-label="Front view">
+                            <button type="button" :class="{ active: previewPreset === 'front' }" @click="setPreviewView('front')" title="Front view" aria-label="Front view">
                                 <i data-lucide="square"></i>
                             </button>
-                            <button type="button" @click="setPreviewView('right')" title="Right view" aria-label="Right view">
+                            <button type="button" :class="{ active: previewPreset === 'right' }" @click="setPreviewView('right')" title="Right view" aria-label="Right view">
                                 <i data-lucide="panel-right"></i>
                             </button>
-                            <button type="button" @click="setPreviewView('top')" title="Top view" aria-label="Top view">
+                            <button type="button" :class="{ active: previewPreset === 'top' }" @click="setPreviewView('top')" title="Top view" aria-label="Top view">
                                 <i data-lucide="panel-top"></i>
                             </button>
                         </div>
+                        <div class="future-window">
+                            <canvas
+                                x-ref="previewCanvas"
+                                class="model-preview"
+                                @pointerdown="startPreviewDrag($event)"
+                                @pointermove="continuePreviewDrag($event)"
+                                @pointerup.window="endPreviewDrag($event)"
+                                @pointercancel.window="endPreviewDrag($event)"
+                                @mousedown.middle.prevent
+                                @auxclick.prevent
+                                @contextmenu.prevent
+                                aria-label="Pannable, rotatable, and zoomable model preview"
+                            ></canvas>
+                        </div>
                     </div>
                 </div>
-                <canvas x-ref="voxelBoundsCanvas" class="voxel-bounds-canvas" aria-hidden="true"></canvas>
                 <div class="drop-indicator" x-show="dropActive" aria-hidden="true">
                     <i data-lucide="image-down"></i>
                 </div>
@@ -171,30 +181,25 @@
 
             <aside class="layers-panel">
                 <section class="layers-section">
+                    <header class="model-editor-header">
+                        <h1>Model Editor</h1>
+                    </header>
                     <header class="layers-header">
-                    <div class="orientation-tabs" role="tablist" aria-label="Model orientation">
-                        <template x-for="orientation in orientations" :key="orientation.id">
-                            <button
-                                type="button"
-                                role="tab"
-                                :class="{ active: activeOrientation === orientation.id }"
-                                :aria-selected="activeOrientation === orientation.id"
-                                @click="switchOrientation(orientation.id)"
-                                x-text="orientation.label"
-                            ></button>
-                        </template>
-                    </div>
-                    <div class="layer-actions">
-                        <button type="button" @click="addLayer()" title="New layer" aria-label="New layer">
-                            <i data-lucide="plus"></i>
-                        </button>
-                        <button type="button" @click="duplicateLayer()" :disabled="!activeLayerId" title="Duplicate layer" aria-label="Duplicate layer">
-                            <i data-lucide="copy"></i>
-                        </button>
-                        <button type="button" @click="removeLayer()" :disabled="layers.length <= 1" title="Delete layer" aria-label="Delete layer">
-                            <i data-lucide="trash-2"></i>
-                        </button>
-                    </div>
+                        <div class="layer-actions">
+                            <button type="button" @click="$refs.fileInput.click()" title="Open image" aria-label="Open image">
+                                <i data-lucide="image-plus"></i>
+                            </button>
+                            <input x-ref="fileInput" class="file-input" type="file" accept="image/*" multiple @change="importFiles($event.target.files); $event.target.value = ''">
+                            <button type="button" @click="addLayer()" title="New layer" aria-label="New layer">
+                                <i data-lucide="plus"></i>
+                            </button>
+                            <button type="button" @click="duplicateLayer()" :disabled="!activeLayerId" title="Duplicate layer" aria-label="Duplicate layer">
+                                <i data-lucide="copy"></i>
+                            </button>
+                            <button type="button" @click="removeLayer()" :disabled="layers.length <= 1" title="Delete layer" aria-label="Delete layer">
+                                <i data-lucide="trash-2"></i>
+                            </button>
+                        </div>
                     </header>
 
                     <div class="layers-list">
@@ -232,10 +237,15 @@
                                 <input
                                     class="layer-depth"
                                     type="number"
-                                    min="1"
+                                    :min="layerDepthMin(layer)"
+                                    :max="layerDepthMax(layer)"
+                                    step="1"
                                     :value="layer.depth"
+                                    draggable="false"
                                     @input="setLayerDepth(layer, $event.target)"
-                                    @pointerdown.stop="activeLayerId = layer.id"
+                                    @pointerdown.stop="beginLayerValueEdit(layer, 'depth')"
+                                    @focus="beginLayerValueEdit(layer, 'depth')"
+                                    @blur="endLayerValueEdit()"
                                     @dblclick.stop
                                     @dragstart.stop.prevent
                                     title="Voxel depth"
@@ -243,18 +253,16 @@
                                 >
                                 <input
                                     class="layer-offset"
-                                    type="range"
-                                    min="0"
-                                    :max="Math.max(0, (layers[layers.indexOf(layer) - 1]?.depth ?? layer.depth) - layer.depth)"
+                                    type="number"
+                                    :min="layerOffsetMin(layer)"
+                                    :max="layerOffsetMax(layer)"
                                     step="1"
                                     :value="layer.offset"
-                                    :disabled="layers.indexOf(layer) === 0 || layer.depth >= layers[layers.indexOf(layer) - 1]?.depth"
                                     draggable="false"
                                     @input="setLayerOffset(layer, $event.target)"
-                                    @pointerdown.stop="activeLayerId = layer.id; editingLayerId = layer.id"
-                                    @pointerup.stop="editingLayerId = null"
-                                    @pointercancel.stop="editingLayerId = null"
-                                    @blur="editingLayerId = null"
+                                    @pointerdown.stop="beginLayerValueEdit(layer, 'offset')"
+                                    @focus="beginLayerValueEdit(layer, 'offset')"
+                                    @blur="endLayerValueEdit()"
                                     @dblclick.stop
                                     @dragstart.stop.prevent
                                     :title="`Depth offset: ${layer.offset}`"

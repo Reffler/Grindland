@@ -12,19 +12,48 @@ const ORIENTATIONS = [
 ];
 
 const viewKey = (orientation, id) => `${orientation}:${id}`;
-const layerDepth = (layer) => Math.max(1, Math.floor(Number(layer?.depth) || 1));
-const layerOffset = (layer, max) => Math.max(0, Math.min(max, Math.floor(Number(layer?.offset) || 0)));
+const layerDepth = (layer) => {
+    const depth = Math.trunc(Number(layer?.depth));
+    return !Number.isFinite(depth) || depth === 0 ? 1 : Math.max(-CANVAS_SIZE, Math.min(CANVAS_SIZE, depth));
+};
+const layerOffset = (layer) => {
+    const offset = Number(layer?.offset);
+    return Math.max(-CANVAS_SIZE / 2, Math.min(CANVAS_SIZE / 2, Number.isFinite(offset) ? Math.floor(offset) : 0));
+};
+const layerDepthLimits = (offset) => ({
+    min: -Math.min(CANVAS_SIZE, CANVAS_SIZE / 2 + 1 + offset),
+    max: Math.min(CANVAS_SIZE, CANVAS_SIZE / 2 + 1 - offset),
+});
+const layerOffsetLimits = (depth) => depth > 0
+    ? { min: -CANVAS_SIZE / 2, max: CANVAS_SIZE / 2 + 1 - depth }
+    : { min: -CANVAS_SIZE / 2 - 1 - depth, max: CANVAS_SIZE / 2 };
+const clampLayerDepth = (layer, offset = layerOffset(layer)) => {
+    const depth = layerDepth(layer);
+    const limits = layerDepthLimits(offset);
+    return depth < 0 ? Math.max(limits.min, depth) : Math.min(limits.max, depth);
+};
+const clampLayerOffset = (layer, depth = layerDepth(layer)) => {
+    const offset = layerOffset(layer);
+    const limits = layerOffsetLimits(depth);
+    return Math.max(limits.min, Math.min(limits.max, offset));
+};
 const layerDepthRanges = (layers) => {
     const ranges = new Map();
-    let start = 0;
-    for (let index = 0; index < layers.length; index++) {
-        const layer = layers[index];
-        if (index) start += layerOffset(layer, layerDepth(layers[index - 1]) - layerDepth(layer));
-        ranges.set(layer.id, { start, end: start + layerDepth(layer) });
+    for (const layer of layers) {
+        const offset = layerOffset(layer);
+        const depth = layerDepth(layer);
+        ranges.set(layer.id, depth > 0
+            ? { start: Math.min(CANVAS_SIZE / 2, 1 - offset) - depth, end: Math.min(CANVAS_SIZE / 2, 1 - offset) }
+            : { start: Math.max(-CANVAS_SIZE / 2, -1 - offset), end: Math.max(-CANVAS_SIZE / 2, -1 - offset) - depth });
     }
     return ranges;
 };
-const modelDepth = (layers) => Math.max(1, ...[...layerDepthRanges(layers).values()].map((range) => range.end));
+const modelDepthBounds = (layers) => {
+    const ranges = [...layerDepthRanges(layers).values()];
+    return ranges.length
+        ? { back: Math.min(...ranges.map((range) => range.start)), front: Math.max(...ranges.map((range) => range.end)) }
+        : { back: 0, front: 0 };
+};
 const containsDepthZ = (range, z) => z >= range.start && z < range.end;
 
 const maskIndex = (x, y) => (y + LAYER_PADDING) * LAYER_SIZE + x + LAYER_PADDING;
@@ -190,11 +219,19 @@ document.addEventListener("alpine:init", () => {
         let moveState = null;
         let straightStroke = null;
         let internalClipboard = null;
+        let layerValueEdit = null;
         let pointerTarget = null;
         let quantizationSource = null;
         let paletteHighlightTimer = null;
         let THREE = null;
         let voxelRenderer = null;
+        let voxelDisplayContext = null;
+        let previewDisplayContext = null;
+        let sharedRendererSize = 0;
+        let voxelRenderFrame = null;
+        let voxelRulersDirty = true;
+        let voxelRulerCoordinate = null;
+        let voxelContextLost = false;
         let voxelScene = null;
         let voxelCamera = null;
         let voxelRoot = null;
@@ -210,20 +247,25 @@ document.addEventListener("alpine:init", () => {
         let voxelSelection = null;
         let voxelSelectionFrame = null;
         let voxelGrid = null;
-        let voxelBoundsCanvas = null;
-        let voxelBoundsContext = null;
-        let voxelBoundsVisible = false;
-        let voxelRotation = null;
         let voxelSnapFrame = null;
+        let voxelPan = null;
         let voxelResizeObserver = null;
         let voxelRaycaster = null;
-        let previewRenderer = null;
+        let previewRenderFrame = null;
+        let previewInteracting = false;
+        let previewViewDirection = null;
+        let previewInverseQuaternion = null;
+        let previewFaceNormals = null;
         let previewScene = null;
         let previewCamera = null;
         let previewRoot = null;
         let previewModelRoot = null;
+        let previewWallHit = null;
+        let previewWallHitFrame = null;
         let previewDrag = null;
+        let previewSnapFrame = null;
         let previewResizeObserver = null;
+        let modelRenderFrame = null;
         const voxelLayerMeshes = new Map();
         const voxelFaceMeshes = new Map();
         const previewLayerMeshes = new Map();
@@ -246,8 +288,8 @@ document.addEventListener("alpine:init", () => {
             verticalSymmetry: false,
             horizontalSymmetry: false,
             voxelReady: false,
-            voxelRotating: false,
             voxelZoom: 1,
+            previewPreset: "perspective",
             orientations: ORIENTATIONS,
             activeOrientation: "front",
             layers: [],
@@ -278,7 +320,7 @@ document.addEventListener("alpine:init", () => {
                     this.clearCenterGuides();
                 });
                 this.$watch("gridVisible", (visible) => {
-                    if (voxelGrid) voxelGrid.visible = visible && !voxelRotation && !voxelSnapFrame;
+                    if (voxelGrid) voxelGrid.visible = visible && !voxelSnapFrame;
                     this.renderVoxelScene();
                 });
                 window.addEventListener("blur", () => { internalClipboard = null; });
@@ -291,20 +333,35 @@ document.addEventListener("alpine:init", () => {
 
             initVoxelScene() {
                 const canvas = this.$refs.voxelCanvas;
-                voxelRenderer = new THREE.WebGLRenderer({ canvas, antialias: false, alpha: false, premultipliedAlpha: false, precision: "highp" });
-                voxelRenderer.setPixelRatio(window.devicePixelRatio);
+                voxelDisplayContext = canvas.getContext("2d");
+                const renderCanvas = document.createElement("canvas");
+                voxelRenderer = new THREE.WebGLRenderer({ canvas: renderCanvas, antialias: false, alpha: false, premultipliedAlpha: false, precision: "highp", powerPreference: "high-performance" });
+                voxelRenderer.setPixelRatio(2);
                 voxelRenderer.outputColorSpace = THREE.SRGBColorSpace;
                 voxelRenderer.toneMapping = THREE.NoToneMapping;
                 voxelRenderer.getContext().disable(voxelRenderer.getContext().DITHER);
+                renderCanvas.addEventListener("webglcontextlost", (event) => {
+                    event.preventDefault();
+                    voxelContextLost = true;
+                    cancelAnimationFrame(voxelRenderFrame);
+                    cancelAnimationFrame(previewRenderFrame);
+                    voxelRenderFrame = null;
+                    previewRenderFrame = null;
+                });
+                renderCanvas.addEventListener("webglcontextrestored", () => {
+                    voxelContextLost = false;
+                    this.renderVoxelScene();
+                    this.renderPreviewScene();
+                });
                 voxelScene = new THREE.Scene();
                 voxelScene.background = new THREE.Color(0xffffff);
                 const viewSize = CANVAS_SIZE;
-                voxelCamera = new THREE.OrthographicCamera(-viewSize / 2, viewSize / 2, viewSize / 2, -viewSize / 2, 0.1, 20000);
-                voxelCamera.position.z = 10000;
+                voxelCamera = new THREE.OrthographicCamera(-viewSize / 2, viewSize / 2, viewSize / 2, -viewSize / 2, 1, 200);
+                voxelCamera.position.z = 100;
                 voxelCamera.zoom = this.voxelZoom;
                 this.$refs.canvas.addEventListener("wheel", (event) => {
                     event.preventDefault();
-                    this.setVoxelZoom(voxelCamera.zoom * Math.exp(-event.deltaY * 0.001));
+                    this.setVoxelZoom(voxelCamera.zoom * Math.exp(-event.deltaY * 0.001), event);
                 }, { passive: false });
                 voxelRoot = new THREE.Group();
                 voxelScene.add(voxelRoot);
@@ -313,9 +370,6 @@ document.addEventListener("alpine:init", () => {
                 const orientation = this.orientationRotation();
                 voxelRoot.rotation.set(orientation.x, orientation.y, 0);
                 voxelViewRoot.rotation.set(-orientation.x, -orientation.y, 0);
-
-                voxelBoundsCanvas = this.$refs.voxelBoundsCanvas;
-                voxelBoundsContext = voxelBoundsCanvas.getContext("2d");
 
                 const checker = document.createElement("canvas");
                 checker.width = checker.height = 16;
@@ -423,89 +477,202 @@ document.addEventListener("alpine:init", () => {
                 voxelSelection.visible = false;
                 voxelSelection.renderOrder = 12;
                 voxelViewRoot.add(voxelSelection);
-                voxelScene.add(new THREE.HemisphereLight(0xffffff, 0x667078, 2.2));
-                const light = new THREE.DirectionalLight(0xffffff, 2.8);
-                light.position.set(-35, 45, 80);
-                voxelScene.add(light);
                 voxelRaycaster = new THREE.Raycaster();
 
                 const resize = () => {
                     const size = canvas.getBoundingClientRect();
-                    voxelRenderer.setSize(size.width, size.height, false);
+                    canvas.width = Math.max(1, Math.round(size.width * 2));
+                    canvas.height = Math.max(1, Math.round(size.height * 2));
+                    this.updateSharedRendererSize();
+                    this.$refs.previewCanvas.closest(".preview-column").style.maxWidth = `${size.height}px`;
                     const aspect = size.width / size.height;
                     voxelCamera.left = -viewSize * aspect / 2;
                     voxelCamera.right = viewSize * aspect / 2;
                     voxelCamera.top = viewSize / 2;
                     voxelCamera.bottom = -viewSize / 2;
                     voxelCamera.updateProjectionMatrix();
-                    const boundsSize = voxelBoundsCanvas.getBoundingClientRect();
-                    voxelBoundsCanvas.width = Math.round(boundsSize.width * window.devicePixelRatio);
-                    voxelBoundsCanvas.height = Math.round(boundsSize.height * window.devicePixelRatio);
+                    voxelRulersDirty = true;
                     this.renderVoxelScene();
                 };
                 voxelResizeObserver = new ResizeObserver(resize);
                 voxelResizeObserver.observe(canvas);
-                voxelResizeObserver.observe(voxelBoundsCanvas);
                 this.voxelReady = true;
                 resize();
                 this.initPreviewScene();
                 this.renderVoxels();
             },
 
-            renderVoxelScene() {
-                if (voxelRenderer) voxelRenderer.render(voxelScene, voxelCamera);
-                this.renderVoxelBounds();
+            updateSharedRendererSize() {
+                if (!voxelRenderer) return;
+                const main = this.$refs.voxelCanvas.getBoundingClientRect();
+                const preview = this.$refs.previewCanvas.getBoundingClientRect();
+                const size = Math.max(1, Math.ceil(Math.max(main.width, main.height, preview.width, preview.height)));
+                if (size === sharedRendererSize) return;
+                sharedRendererSize = size;
+                voxelRenderer.setSize(size, size, false);
             },
 
-            setVoxelZoom(value) {
-                this.voxelZoom = Math.max(0.5, Math.min(4, Number(value) || 1));
+            renderSharedScene(scene, camera, canvas, context) {
+                voxelRenderer.setViewport(0, 0, canvas.width / 2, canvas.height / 2);
+                voxelRenderer.render(scene, camera);
+                context.drawImage(
+                    voxelRenderer.domElement,
+                    0,
+                    voxelRenderer.domElement.height - canvas.height,
+                    canvas.width,
+                    canvas.height,
+                    0,
+                    0,
+                    canvas.width,
+                    canvas.height,
+                );
+            },
+
+            renderVoxelScene() {
+                if (previewInteracting || voxelContextLost) return;
+                if (!voxelRenderer || voxelRenderFrame) return;
+                voxelRenderFrame = requestAnimationFrame(() => {
+                    voxelRenderFrame = null;
+                    if (voxelRulersDirty) {
+                        voxelRulersDirty = false;
+                        this.renderCanvasRulers();
+                    }
+                    this.renderSharedScene(voxelScene, voxelCamera, this.$refs.voxelCanvas, voxelDisplayContext);
+                });
+            },
+
+            renderCanvasRulers() {
+                if (!voxelCamera || !this.$refs.horizontalRuler) return;
+                const size = this.$refs.voxelCanvas.getBoundingClientRect();
+                const ratio = Math.min(window.devicePixelRatio, 2);
+                const prepare = (canvas, width, height) => {
+                    const pixelWidth = Math.round(width * ratio);
+                    const pixelHeight = Math.round(height * ratio);
+                    if (canvas.width !== pixelWidth) canvas.width = pixelWidth;
+                    if (canvas.height !== pixelHeight) canvas.height = pixelHeight;
+                    const context = canvas.getContext("2d");
+                    context.setTransform(ratio, 0, 0, ratio, 0, 0);
+                    context.clearRect(0, 0, width, height);
+                    context.fillStyle = "#1b1e21";
+                    context.fillRect(0, 0, width, height);
+                    context.strokeStyle = "#72797d";
+                    context.fillStyle = "#b8bdc0";
+                    context.font = "9px Inter, sans-serif";
+                    return context;
+                };
+                const horizontal = this.$refs.horizontalRuler;
+                const vertical = this.$refs.verticalRuler;
+                const horizontalHeight = horizontal.getBoundingClientRect().height;
+                const verticalWidth = vertical.getBoundingClientRect().width;
+                const horizontalContext = prepare(horizontal, size.width, horizontalHeight);
+                const verticalContext = prepare(vertical, verticalWidth, size.height);
+                const visibleWidth = (voxelCamera.right - voxelCamera.left) / voxelCamera.zoom;
+                const visibleHeight = (voxelCamera.top - voxelCamera.bottom) / voxelCamera.zoom;
+                const left = voxelCamera.position.x - visibleWidth / 2;
+                const top = voxelCamera.position.y + visibleHeight / 2;
+                horizontalContext.beginPath();
+                verticalContext.beginPath();
+                for (let value = 1; value <= CANVAS_SIZE; value++) {
+                    const major = value % 8 === 0;
+                    const medium = value % 4 === 0;
+                    const length = major ? 10 : medium ? 7 : 4;
+                    const x = (value - CANVAS_SIZE / 2 - left) / visibleWidth * size.width;
+                    if (x >= 0 && x <= size.width) {
+                        horizontalContext.moveTo(Math.round(x) + 0.5, 0);
+                        horizontalContext.lineTo(Math.round(x) + 0.5, length);
+                        if (major) {
+                            horizontalContext.textAlign = "right";
+                            horizontalContext.textBaseline = "bottom";
+                            horizontalContext.fillText(value, x - 2, horizontalHeight - 2);
+                        }
+                    }
+                    const y = (top - (CANVAS_SIZE / 2 - value)) / visibleHeight * size.height;
+                    if (y >= 0 && y <= size.height) {
+                        verticalContext.moveTo(0, Math.round(y) + 0.5);
+                        verticalContext.lineTo(length, Math.round(y) + 0.5);
+                        if (major) {
+                            verticalContext.textAlign = "right";
+                            verticalContext.textBaseline = "bottom";
+                            verticalContext.fillText(value, verticalWidth - 2, y - 2);
+                        }
+                    }
+                }
+                horizontalContext.stroke();
+                verticalContext.stroke();
+                if (this.hoverPoint) {
+                    const coordinateX = Math.max(0, Math.min(CANVAS_SIZE - 1, Math.floor(this.hoverPoint.x))) + 1;
+                    const coordinateY = Math.max(0, Math.min(CANVAS_SIZE - 1, Math.floor(this.hoverPoint.y))) + 1;
+                    const caretX = (coordinateX - CANVAS_SIZE / 2 - left) / visibleWidth * size.width;
+                    const caretY = (top - (CANVAS_SIZE / 2 - coordinateY)) / visibleHeight * size.height;
+                    horizontalContext.fillStyle = "#d7dcde";
+                    horizontalContext.beginPath();
+                    horizontalContext.moveTo(caretX, 0);
+                    horizontalContext.lineTo(caretX - 4, 7);
+                    horizontalContext.lineTo(caretX + 4, 7);
+                    horizontalContext.closePath();
+                    horizontalContext.fill();
+                    horizontalContext.font = "bold 9px Inter, sans-serif";
+                    horizontalContext.textAlign = "right";
+                    horizontalContext.textBaseline = "bottom";
+                    horizontalContext.fillText(coordinateX, caretX - 2, horizontalHeight - 2);
+                    verticalContext.fillStyle = "#d7dcde";
+                    verticalContext.beginPath();
+                    verticalContext.moveTo(0, caretY);
+                    verticalContext.lineTo(7, caretY - 4);
+                    verticalContext.lineTo(7, caretY + 4);
+                    verticalContext.closePath();
+                    verticalContext.fill();
+                    verticalContext.font = "bold 9px Inter, sans-serif";
+                    verticalContext.textAlign = "right";
+                    verticalContext.textBaseline = "bottom";
+                    verticalContext.fillText(coordinateY, verticalWidth - 2, caretY - 2);
+                }
+            },
+
+            setVoxelZoom(value, event = null) {
+                const zoom = Math.max(1, Math.min(4, Number(value) || 1));
+                let anchor = null;
+                if (voxelCamera && event && zoom > 1) {
+                    const rect = this.$refs.canvas.getBoundingClientRect();
+                    const x = (event.clientX - rect.left) / rect.width * 2 - 1;
+                    const y = -(event.clientY - rect.top) / rect.height * 2 + 1;
+                    anchor = {
+                        x: voxelCamera.position.x + x * (voxelCamera.right - voxelCamera.left) / (2 * voxelCamera.zoom),
+                        y: voxelCamera.position.y + y * (voxelCamera.top - voxelCamera.bottom) / (2 * voxelCamera.zoom),
+                        pointerX: x,
+                        pointerY: y,
+                    };
+                }
+                this.voxelZoom = zoom;
                 if (!voxelCamera) return;
                 voxelCamera.zoom = this.voxelZoom;
+                if (this.voxelZoom === 1) {
+                    voxelCamera.position.x = 0;
+                    voxelCamera.position.y = 0;
+                } else if (anchor) {
+                    voxelCamera.position.x = anchor.x - anchor.pointerX * (voxelCamera.right - voxelCamera.left) / (2 * voxelCamera.zoom);
+                    voxelCamera.position.y = anchor.y - anchor.pointerY * (voxelCamera.top - voxelCamera.bottom) / (2 * voxelCamera.zoom);
+                }
+                this.clampVoxelCamera();
                 voxelCamera.updateProjectionMatrix();
+                voxelRulersDirty = true;
                 this.renderVoxelScene();
             },
 
-            renderVoxelBounds() {
-                if (!voxelBoundsContext) return;
-                voxelBoundsContext.clearRect(0, 0, voxelBoundsCanvas.width, voxelBoundsCanvas.height);
-                if (!voxelBoundsVisible) return;
-                const boundsRect = voxelBoundsCanvas.getBoundingClientRect();
-                const canvasRect = this.$refs.voxelCanvas.getBoundingClientRect();
-                voxelRoot.updateMatrixWorld(true);
-                const vertices = [
-                    [-32, -32, 0], [32, -32, 0], [32, 32, 0], [-32, 32, 0],
-                    [-32, -32, 64], [32, -32, 64], [32, 32, 64], [-32, 32, 64],
-                ].map(([x, y, z]) => {
-                    const point = new THREE.Vector3(x, y, z).applyMatrix4(voxelRoot.matrixWorld).project(voxelCamera);
-                    return [
-                        canvasRect.left - boundsRect.left + (point.x + 1) * canvasRect.width / 2,
-                        canvasRect.top - boundsRect.top + (1 - point.y) * canvasRect.height / 2,
-                    ];
-                });
-                const scale = window.devicePixelRatio;
-                voxelBoundsContext.setTransform(scale, 0, 0, scale, 0, 0);
-                voxelBoundsContext.strokeStyle = "#ff00ff";
-                voxelBoundsContext.lineWidth = 1;
-                voxelBoundsContext.beginPath();
-                for (const [start, end] of [[0, 1], [1, 2], [2, 3], [3, 0], [4, 5], [5, 6], [6, 7], [7, 4], [0, 4], [1, 5], [2, 6], [3, 7]]) {
-                    voxelBoundsContext.moveTo(...vertices[start]);
-                    voxelBoundsContext.lineTo(...vertices[end]);
-                }
-                voxelBoundsContext.stroke();
-                voxelBoundsContext.resetTransform();
+            clampVoxelCamera() {
+                const limitX = Math.max(0, CANVAS_SIZE / 2 - (voxelCamera.right - voxelCamera.left) / (2 * voxelCamera.zoom));
+                const limitY = Math.max(0, CANVAS_SIZE / 2 - (voxelCamera.top - voxelCamera.bottom) / (2 * voxelCamera.zoom));
+                voxelCamera.position.x = Math.max(-limitX, Math.min(limitX, voxelCamera.position.x));
+                voxelCamera.position.y = Math.max(-limitY, Math.min(limitY, voxelCamera.position.y));
             },
 
             initPreviewScene() {
                 const canvas = this.$refs.previewCanvas;
-                previewRenderer = new THREE.WebGLRenderer({ canvas, antialias: false, alpha: false, premultipliedAlpha: false, precision: "highp" });
-                previewRenderer.setPixelRatio(window.devicePixelRatio);
-                previewRenderer.outputColorSpace = THREE.SRGBColorSpace;
-                previewRenderer.toneMapping = THREE.NoToneMapping;
-                previewRenderer.getContext().disable(previewRenderer.getContext().DITHER);
+                previewDisplayContext = canvas.getContext("2d");
                 previewScene = new THREE.Scene();
                 previewScene.background = new THREE.Color(0xffffff);
-                previewCamera = new THREE.OrthographicCamera(-50, 50, 50, -50, 0.1, 20000);
-                previewCamera.position.z = 10000;
+                previewCamera = new THREE.OrthographicCamera(-50, 50, 50, -50, 1, 200);
+                previewCamera.position.z = 100;
                 canvas.addEventListener("wheel", (event) => {
                     event.preventDefault();
                     previewCamera.zoom = THREE.MathUtils.clamp(previewCamera.zoom * Math.exp(-event.deltaY * 0.001), 0.5, 4);
@@ -514,12 +681,61 @@ document.addEventListener("alpine:init", () => {
                 }, { passive: false });
                 previewRoot = new THREE.Group();
                 previewRoot.rotation.set(Math.PI / 6, -Math.PI / 4, 0);
+                previewViewDirection = new THREE.Vector3();
+                previewInverseQuaternion = new THREE.Quaternion();
+                previewFaceNormals = {
+                    front: new THREE.Vector3(0, 0, 1),
+                    back: new THREE.Vector3(0, 0, -1),
+                    right: new THREE.Vector3(1, 0, 0),
+                    left: new THREE.Vector3(-1, 0, 0),
+                    top: new THREE.Vector3(0, 1, 0),
+                    bottom: new THREE.Vector3(0, -1, 0),
+                };
                 previewModelRoot = new THREE.Group();
                 previewRoot.add(previewModelRoot);
+                const previewBounds = new THREE.LineSegments(
+                    new THREE.EdgesGeometry(new THREE.BoxGeometry(CANVAS_SIZE, CANVAS_SIZE, CANVAS_SIZE)),
+                    new THREE.LineBasicMaterial({ color: 0xff00ff, depthTest: true }),
+                );
+                previewBounds.renderOrder = 15;
+                previewRoot.add(previewBounds);
+                previewWallHit = new THREE.Group();
+                const wallPlane = new THREE.Mesh(
+                    new THREE.PlaneGeometry(CANVAS_SIZE, CANVAS_SIZE),
+                    new THREE.MeshBasicMaterial({ color: 0x55d6be, transparent: true, opacity: 0, depthTest: false, depthWrite: false, side: THREE.DoubleSide }),
+                );
+                wallPlane.renderOrder = 17;
+                previewWallHit.add(wallPlane);
+                const wallFrame = new THREE.LineSegments(
+                    new THREE.EdgesGeometry(new THREE.PlaneGeometry(CANVAS_SIZE, CANVAS_SIZE)),
+                    new THREE.LineBasicMaterial({ color: 0x75ead4, transparent: true, opacity: 0, depthTest: false }),
+                );
+                wallFrame.renderOrder = 18;
+                previewWallHit.add(wallFrame);
+                previewWallHit.visible = false;
+                previewRoot.add(previewWallHit);
+                const previewAxes = new THREE.LineSegments(
+                    new THREE.BufferGeometry()
+                        .setAttribute("position", new THREE.Float32BufferAttribute([
+                            -8, 0, 0, 8, 0, 0,
+                            0, -8, 0, 0, 8, 0,
+                            0, 0, -8, 0, 0, 8,
+                        ], 3))
+                        .setAttribute("color", new THREE.Float32BufferAttribute([
+                            1, 0, 0, 1, 0, 0,
+                            0, 1, 0, 0, 1, 0,
+                            0, 0.45, 1, 0, 0.45, 1,
+                        ], 3)),
+                    new THREE.LineBasicMaterial({ vertexColors: true, depthTest: false }),
+                );
+                previewAxes.renderOrder = 16;
+                previewRoot.add(previewAxes);
                 previewScene.add(previewRoot);
                 const resize = () => {
                     const size = canvas.getBoundingClientRect();
-                    previewRenderer.setSize(size.width, size.height, false);
+                    canvas.width = Math.max(1, Math.round(size.width * 2));
+                    canvas.height = Math.max(1, Math.round(size.height * 2));
+                    this.updateSharedRendererSize();
                     const aspect = size.width / size.height;
                     previewCamera.left = -50 * aspect;
                     previewCamera.right = 50 * aspect;
@@ -534,37 +750,80 @@ document.addEventListener("alpine:init", () => {
             },
 
             renderPreviewScene() {
-                if (previewRenderer) previewRenderer.render(previewScene, previewCamera);
+                if (!voxelRenderer || previewRenderFrame || voxelContextLost) return;
+                previewRenderFrame = requestAnimationFrame(() => {
+                    previewRenderFrame = null;
+                    this.updatePreviewFaceVisibility();
+                    this.renderSharedScene(previewScene, previewCamera, this.$refs.previewCanvas, previewDisplayContext);
+                });
+            },
+
+            updatePreviewFaceVisibility() {
+                if (!previewRoot || !previewFaceNormals) return;
+                previewInverseQuaternion.copy(previewRoot.quaternion).invert();
+                previewViewDirection.set(0, 0, 1).applyQuaternion(previewInverseQuaternion);
+                for (const [key, mesh] of previewFaceMeshes) {
+                    const orientation = key.slice(0, key.indexOf(":"));
+                    mesh.visible = mesh.userData.sourceVisible && previewFaceNormals[orientation].dot(previewViewDirection) > 0.0001;
+                }
+            },
+
+            setPreviewInteraction(active) {
+                if (previewInteracting === active) return;
+                previewInteracting = active;
+                if (active) {
+                    cancelAnimationFrame(voxelRenderFrame);
+                    voxelRenderFrame = null;
+                    return;
+                }
+                this.renderPreviewScene();
+                this.renderVoxelScene();
             },
 
             syncPreviewVoxels() {
                 if (!previewModelRoot) return;
                 const syncMesh = (source, key, targets) => {
                     let target = targets.get(key);
-                    if (!target) {
-                        target = source.clone();
+                    if (!target || target.instanceMatrix.count < source.count) {
+                        if (target) {
+                            target.removeFromParent();
+                            target.dispose();
+                        }
+                        const capacity = Math.max(1, 2 ** Math.ceil(Math.log2(Math.max(1, source.count))));
+                        target = new THREE.InstancedMesh(source.geometry, source.material, capacity);
+                        target.instanceMatrix.setUsage(THREE.DynamicDrawUsage);
                         targets.set(key, target);
                         previewModelRoot.add(target);
                     }
+                    target.userData.sourceVisible = source.visible;
                     target.visible = source.visible;
                     target.count = source.count;
-                    target.instanceMatrix.array.set(source.instanceMatrix.array);
+                    if (!source.visible || !source.count) return;
+                    target.instanceMatrix.array.set(source.instanceMatrix.array.subarray(0, source.count * 16));
                     target.instanceMatrix.needsUpdate = true;
                     if (source.instanceColor) {
-                        if (!target.instanceColor) target.instanceColor = source.instanceColor.clone();
-                        else target.instanceColor.array.set(source.instanceColor.array);
+                        if (!target.instanceColor) {
+                            target.instanceColor = new THREE.InstancedBufferAttribute(new Float32Array(target.instanceMatrix.count * 3), 3);
+                            target.instanceColor.setUsage(THREE.DynamicDrawUsage);
+                        }
+                        target.instanceColor.array.set(source.instanceColor.array.subarray(0, source.count * 3));
                         target.instanceColor.needsUpdate = true;
                     }
+                    target.boundingSphere = source.boundingSphere?.clone() ?? null;
                 };
                 for (const [id, mesh] of voxelLayerMeshes) syncMesh(mesh, id, previewLayerMeshes);
                 for (const [key, mesh] of voxelFaceMeshes) syncMesh(mesh, key, previewFaceMeshes);
-                previewModelRoot.position.z = -modelDepth(this.layers) / 2;
+                previewModelRoot.position.z = 0;
                 this.renderPreviewScene();
             },
 
             startPreviewDrag(event) {
-                if ((event.button !== 0 && event.button !== 2) || !previewRoot) return;
+                if ((event.button !== 0 && event.button !== 1) || !previewRoot) return;
                 event.preventDefault();
+                this.blurActiveControl();
+                cancelAnimationFrame(previewSnapFrame);
+                previewSnapFrame = null;
+                this.setPreviewInteraction(true);
                 event.currentTarget.setPointerCapture(event.pointerId);
                 previewDrag = {
                     canvas: event.currentTarget,
@@ -596,14 +855,40 @@ document.addEventListener("alpine:init", () => {
 
             endPreviewDrag(event) {
                 if (event.pointerId !== previewDrag?.pointerId) return;
+                const mode = previewDrag.mode;
                 if (previewDrag.canvas.hasPointerCapture(event.pointerId)) previewDrag.canvas.releasePointerCapture(event.pointerId);
                 previewDrag = null;
+                if (mode === "rotate") this.setPreviewView(this.previewPreset);
+                else this.setPreviewInteraction(false);
             },
 
             resetPreviewPosition() {
                 if (!previewRoot) return;
                 previewRoot.position.set(0, 0, 0);
                 this.renderPreviewScene();
+            },
+
+            flashPreviewWall(side) {
+                if (!previewWallHit) return;
+                cancelAnimationFrame(previewWallHitFrame);
+                previewWallHit.position.z = side === "front" ? CANVAS_SIZE / 2 : -CANVAS_SIZE / 2;
+                previewWallHit.visible = true;
+                const started = performance.now();
+                const flash = (time) => {
+                    const progress = Math.min(1, (time - started) / 320);
+                    const pulse = Math.sin(progress * Math.PI);
+                    previewWallHit.children[0].material.opacity = pulse * 0.18;
+                    previewWallHit.children[1].material.opacity = pulse * 0.9;
+                    previewWallHit.scale.setScalar(0.96 + pulse * 0.04);
+                    if (progress < 1) previewWallHitFrame = requestAnimationFrame(flash);
+                    else {
+                        previewWallHitFrame = null;
+                        previewWallHit.visible = false;
+                        previewWallHit.scale.setScalar(1);
+                    }
+                    this.renderPreviewScene();
+                };
+                previewWallHitFrame = requestAnimationFrame(flash);
             },
 
             setPreviewView(view) {
@@ -614,9 +899,26 @@ document.addEventListener("alpine:init", () => {
                     right: [0, -Math.PI / 2],
                     top: [Math.PI / 2, 0],
                 };
-                const [x, y] = rotations[view] ?? rotations.perspective;
-                previewRoot.rotation.set(x, y, 0);
-                this.renderPreviewScene();
+                const preset = rotations[view] ? view : "perspective";
+                const [x, y] = rotations[preset];
+                this.previewPreset = preset;
+                this.setPreviewInteraction(true);
+                cancelAnimationFrame(previewSnapFrame);
+                const startRotation = previewRoot.quaternion.clone();
+                const targetRotation = new THREE.Quaternion().setFromEuler(new THREE.Euler(x, y, 0));
+                const started = performance.now();
+                const snap = (time) => {
+                    const progress = Math.min(1, (time - started) / 260);
+                    previewRoot.quaternion.slerpQuaternions(startRotation, targetRotation, 1 - (1 - progress) ** 3);
+                    if (progress < 1) previewSnapFrame = requestAnimationFrame(snap);
+                    else {
+                        previewSnapFrame = null;
+                        previewRoot.rotation.set(x, y, 0);
+                        this.setPreviewInteraction(false);
+                    }
+                    this.renderPreviewScene();
+                };
+                previewSnapFrame = requestAnimationFrame(snap);
             },
 
             layerViewKey(id = this.activeLayerId, orientation = this.activeOrientation) {
@@ -633,53 +935,55 @@ document.addEventListener("alpine:init", () => {
 
             syncDerivedOrientations() {
                 const ranges = layerDepthRanges(this.layers);
-                for (const layer of this.layers) for (const orientation of ORIENTATIONS.slice(1)) {
-                    const key = viewKey(orientation.id, layer.id);
-                    if (editedViews.has(key)) continue;
+                for (const layer of this.layers) {
                     const source = this.canvasFor(layer.id, "front").getContext("2d").getImageData(LAYER_PADDING, LAYER_PADDING, CANVAS_SIZE, CANVAS_SIZE);
-                    const target = this.canvasFor(layer.id, orientation.id).getContext("2d");
-                    const projection = target.createImageData(CANVAS_SIZE, CANVAS_SIZE, { colorSpace: "srgb" });
                     const range = ranges.get(layer.id);
-                    const copy = (sourceOffset, x, y) => {
-                        if (x < 0 || x >= CANVAS_SIZE || y < 0 || y >= CANVAS_SIZE) return;
-                        const targetOffset = (y * CANVAS_SIZE + x) * 4;
-                        projection.data.set(source.data.subarray(sourceOffset, sourceOffset + 4), targetOffset);
-                    };
-                    if (orientation.id === "back") {
-                        for (let y = 0; y < CANVAS_SIZE; y++) for (let x = 0; x < CANVAS_SIZE; x++) {
-                            const offset = (y * CANVAS_SIZE + CANVAS_SIZE - 1 - x) * 4;
-                            if (source.data[offset + 3]) copy(offset, x, y);
+                    for (const orientation of ORIENTATIONS.slice(1)) {
+                        const key = viewKey(orientation.id, layer.id);
+                        if (editedViews.has(key)) continue;
+                        const target = this.canvasFor(layer.id, orientation.id).getContext("2d");
+                        const projection = target.createImageData(CANVAS_SIZE, CANVAS_SIZE, { colorSpace: "srgb" });
+                        const copy = (sourceOffset, x, y) => {
+                            if (x < 0 || x >= CANVAS_SIZE || y < 0 || y >= CANVAS_SIZE) return;
+                            const targetOffset = (y * CANVAS_SIZE + x) * 4;
+                            for (let channel = 0; channel < 4; channel++) projection.data[targetOffset + channel] = source.data[sourceOffset + channel];
+                        };
+                        if (orientation.id === "back") {
+                            for (let y = 0; y < CANVAS_SIZE; y++) for (let x = 0; x < CANVAS_SIZE; x++) {
+                                const offset = (y * CANVAS_SIZE + CANVAS_SIZE - 1 - x) * 4;
+                                if (source.data[offset + 3]) copy(offset, x, y);
+                            }
+                        } else if (orientation.id === "right" || orientation.id === "left") {
+                            for (let y = 0; y < CANVAS_SIZE; y++) {
+                                const start = orientation.id === "right" ? CANVAS_SIZE - 1 : 0;
+                                const step = orientation.id === "right" ? -1 : 1;
+                                let offset = -1;
+                                for (let x = start; x >= 0 && x < CANVAS_SIZE; x += step) {
+                                    const candidate = (y * CANVAS_SIZE + x) * 4;
+                                    if (source.data[candidate + 3]) { offset = candidate; break; }
+                                }
+                                for (let z = range.start; offset >= 0 && z < range.end; z++) {
+                                    copy(offset, orientation.id === "right" ? 31 - z : 32 + z, y);
+                                }
+                            }
+                        } else {
+                            for (let x = 0; x < CANVAS_SIZE; x++) {
+                                const start = orientation.id === "top" ? 0 : CANVAS_SIZE - 1;
+                                const step = orientation.id === "top" ? 1 : -1;
+                                let offset = -1;
+                                for (let y = start; y >= 0 && y < CANVAS_SIZE; y += step) {
+                                    const candidate = (y * CANVAS_SIZE + x) * 4;
+                                    if (source.data[candidate + 3]) { offset = candidate; break; }
+                                }
+                                for (let z = range.start; offset >= 0 && z < range.end; z++) {
+                                    copy(offset, x, orientation.id === "top" ? 32 + z : 31 - z);
+                                }
+                            }
                         }
-                    } else if (orientation.id === "right" || orientation.id === "left") {
-                        for (let y = 0; y < CANVAS_SIZE; y++) {
-                            const start = orientation.id === "right" ? CANVAS_SIZE - 1 : 0;
-                            const step = orientation.id === "right" ? -1 : 1;
-                            let offset = -1;
-                            for (let x = start; x >= 0 && x < CANVAS_SIZE; x += step) {
-                                const candidate = (y * CANVAS_SIZE + x) * 4;
-                                if (source.data[candidate + 3]) { offset = candidate; break; }
-                            }
-                            for (let z = range.start; offset >= 0 && z < range.end; z++) {
-                                copy(offset, orientation.id === "right" ? 31 - z : 32 + z, y);
-                            }
-                        }
-                    } else {
-                        for (let x = 0; x < CANVAS_SIZE; x++) {
-                            const start = orientation.id === "top" ? 0 : CANVAS_SIZE - 1;
-                            const step = orientation.id === "top" ? 1 : -1;
-                            let offset = -1;
-                            for (let y = start; y >= 0 && y < CANVAS_SIZE; y += step) {
-                                const candidate = (y * CANVAS_SIZE + x) * 4;
-                                if (source.data[candidate + 3]) { offset = candidate; break; }
-                            }
-                            for (let z = range.start; offset >= 0 && z < range.end; z++) {
-                                copy(offset, x, orientation.id === "top" ? 32 + z : 31 - z);
-                            }
-                        }
+                        target.clearRect(0, 0, LAYER_SIZE, LAYER_SIZE);
+                        target.putImageData(projection, LAYER_PADDING, LAYER_PADDING);
+                        quantizedPalettes.delete(key);
                     }
-                    target.clearRect(0, 0, LAYER_SIZE, LAYER_SIZE);
-                    target.putImageData(projection, LAYER_PADDING, LAYER_PADDING);
-                    quantizedPalettes.delete(key);
                 }
             },
 
@@ -690,31 +994,45 @@ document.addEventListener("alpine:init", () => {
                 const visibleLayers = this.layers.filter((layer) => layer.visible);
                 const visibleIds = new Set(visibleLayers.map((layer) => layer.id));
                 const visibleFaceKeys = new Set();
-                const modelExtent = modelDepth(this.layers);
+                const bounds = modelDepthBounds(this.layers);
                 const ranges = layerDepthRanges(this.layers);
-                const editingSurface = this.activeOrientation === "front" ? modelExtent : this.activeOrientation === "back" ? 0 : CANVAS_SIZE / 2;
-                voxelGrid.position.z = editingSurface + visibleLayers.length * 0.001 + 0.01;
-                for (const [index, layer] of visibleLayers.entries()) {
-                    let mesh = voxelLayerMeshes.get(layer.id);
-                    if (!mesh) {
-                        mesh = new THREE.InstancedMesh(voxelGeometry, voxelMaterial, CANVAS_SIZE * CANVAS_SIZE);
+                const countOpaque = (pixels) => {
+                    let count = 0;
+                    for (let offset = 3; offset < pixels.length; offset += 4) if (pixels[offset]) count++;
+                    return count;
+                };
+                const ensureMesh = (meshes, key, geometry, required) => {
+                    const capacity = Math.max(1, 2 ** Math.ceil(Math.log2(Math.max(1, required))));
+                    let mesh = meshes.get(key);
+                    if (!mesh || mesh.instanceMatrix.count < required || mesh.instanceMatrix.count > capacity * 4) {
+                        if (mesh) {
+                            mesh.removeFromParent();
+                            mesh.dispose();
+                        }
+                        mesh = new THREE.InstancedMesh(geometry, voxelMaterial, capacity);
                         mesh.instanceMatrix.setUsage(THREE.DynamicDrawUsage);
-                        voxelLayerMeshes.set(layer.id, mesh);
+                        meshes.set(key, mesh);
                         voxelRoot.add(mesh);
                     }
+                    return mesh;
+                };
+                const editingSurface = this.activeOrientation === "front" ? bounds.front : this.activeOrientation === "back" ? -bounds.back : CANVAS_SIZE / 2;
+                voxelGrid.position.z = editingSurface + visibleLayers.length * 0.001 + 0.01;
+                for (const [index, layer] of visibleLayers.entries()) {
                     const pixels = this.canvasFor(layer.id, "front").getContext("2d").getImageData(LAYER_PADDING, LAYER_PADDING, CANVAS_SIZE, CANVAS_SIZE).data;
-                    const depth = layerDepth(layer);
+                    const mesh = ensureMesh(voxelLayerMeshes, layer.id, voxelGeometry, countOpaque(pixels));
                     const range = ranges.get(layer.id);
+                    const depth = range.end - range.start;
                     const offset = (visibleLayers.length - index) * 0.001;
                     const left = new Int16Array(CANVAS_SIZE).fill(-1);
                     const right = new Int16Array(CANVAS_SIZE).fill(-1);
                     const top = new Int16Array(CANVAS_SIZE).fill(-1);
                     const bottom = new Int16Array(CANVAS_SIZE).fill(-1);
                     let count = 0;
+                    matrix.makeScale(1, 1, depth);
                     for (let y = 0; y < CANVAS_SIZE; y++) for (let x = 0; x < CANVAS_SIZE; x++) {
                         const pixelOffset = (y * CANVAS_SIZE + x) * 4;
                         if (!pixels[pixelOffset + 3]) continue;
-                        matrix.makeScale(1, 1, depth);
                         matrix.setPosition(x - 31.5, 31.5 - y, range.start + depth / 2);
                         mesh.setMatrixAt(count, matrix);
                         color.setRGB(pixels[pixelOffset] / 255, pixels[pixelOffset + 1] / 255, pixels[pixelOffset + 2] / 255, THREE.SRGBColorSpace);
@@ -727,19 +1045,16 @@ document.addEventListener("alpine:init", () => {
                     mesh.visible = true;
                     mesh.count = count;
                     mesh.instanceMatrix.needsUpdate = true;
-                    if (mesh.instanceColor) mesh.instanceColor.needsUpdate = true;
+                    if (mesh.instanceColor) {
+                        mesh.instanceColor.setUsage(THREE.DynamicDrawUsage);
+                        mesh.instanceColor.needsUpdate = true;
+                    }
                     mesh.computeBoundingSphere();
                     for (const orientation of ORIENTATIONS) {
                         const key = viewKey(orientation.id, layer.id);
                         visibleFaceKeys.add(key);
-                        let face = voxelFaceMeshes.get(key);
-                        if (!face) {
-                            face = new THREE.InstancedMesh(voxelFaceGeometries.get(orientation.id), voxelMaterial, CANVAS_SIZE * CANVAS_SIZE);
-                            face.instanceMatrix.setUsage(THREE.DynamicDrawUsage);
-                            voxelFaceMeshes.set(key, face);
-                            voxelRoot.add(face);
-                        }
                         const facePixels = this.canvasFor(layer.id, orientation.id).getContext("2d").getImageData(LAYER_PADDING, LAYER_PADDING, CANVAS_SIZE, CANVAS_SIZE).data;
+                        const face = ensureMesh(voxelFaceMeshes, key, voxelFaceGeometries.get(orientation.id), countOpaque(facePixels));
                         let faceCount = 0;
                         for (let y = 0; y < CANVAS_SIZE; y++) for (let x = 0; x < CANVAS_SIZE; x++) {
                             const pixelOffset = (y * CANVAS_SIZE + x) * 4;
@@ -772,14 +1087,30 @@ document.addEventListener("alpine:init", () => {
                         face.count = faceCount;
                         face.visible = faceCount > 0;
                         face.instanceMatrix.needsUpdate = true;
-                        if (face.instanceColor) face.instanceColor.needsUpdate = true;
+                        if (face.instanceColor) {
+                            face.instanceColor.setUsage(THREE.DynamicDrawUsage);
+                            face.instanceColor.needsUpdate = true;
+                        }
                         face.computeBoundingSphere();
                     }
                 }
-                for (const [id, mesh] of voxelLayerMeshes) if (!visibleIds.has(id)) mesh.visible = false;
-                for (const [key, mesh] of voxelFaceMeshes) if (!visibleFaceKeys.has(key)) mesh.visible = false;
+                const pruneMeshes = (sources, targets, valid) => {
+                    for (const [key, mesh] of sources) {
+                        if (valid.has(key)) continue;
+                        mesh.removeFromParent();
+                        mesh.dispose();
+                        sources.delete(key);
+                        const target = targets.get(key);
+                        if (!target) continue;
+                        target.removeFromParent();
+                        target.dispose();
+                        targets.delete(key);
+                    }
+                };
+                pruneMeshes(voxelLayerMeshes, previewLayerMeshes, visibleIds);
+                pruneMeshes(voxelFaceMeshes, previewFaceMeshes, visibleFaceKeys);
                 this.syncPreviewVoxels();
-                this.renderVoxelSelection();
+                if (voxelSelection) voxelSelection.position.z = this.voxelLayerDepth() + 0.52;
                 this.renderVoxelScene();
             },
 
@@ -790,7 +1121,7 @@ document.addEventListener("alpine:init", () => {
                 const range = layerDepthRanges(this.layers).get(id);
                 const surface = this.activeOrientation === "front"
                     ? range.end - 0.5
-                    : this.activeOrientation === "back" ? range.start - 0.5 : CANVAS_SIZE / 2 - 0.5;
+                    : this.activeOrientation === "back" ? -range.start - 0.5 : CANVAS_SIZE / 2 - 0.5;
                 return surface + (visibleLayers.length - index) * 0.001;
             },
 
@@ -810,9 +1141,13 @@ document.addEventListener("alpine:init", () => {
                     if (!selected(x, y + 1)) addEdge(x + 1, y + 1, x, y + 1);
                     if (!selected(x - 1, y)) addEdge(x, y + 1, x, y);
                 }
-                voxelSelection.geometry.setAttribute("position", new THREE.Float32BufferAttribute(positions, 3));
-                voxelSelection.geometry.setAttribute("lineDistance", new THREE.Float32BufferAttribute(distances, 1));
-                voxelSelection.geometry.computeBoundingSphere();
+                const geometry = new THREE.BufferGeometry();
+                geometry.setAttribute("position", new THREE.Float32BufferAttribute(positions, 3));
+                geometry.setAttribute("lineDistance", new THREE.Float32BufferAttribute(distances, 1));
+                geometry.computeBoundingSphere();
+                const previousGeometry = voxelSelection.geometry;
+                voxelSelection.geometry = geometry;
+                previousGeometry.dispose();
                 voxelSelection.position.z = this.voxelLayerDepth() + 0.52;
                 voxelSelection.visible = positions.length > 0;
                 if (voxelSelection.visible && !voxelSelectionFrame) this.animateVoxelSelection();
@@ -839,7 +1174,19 @@ document.addEventListener("alpine:init", () => {
                 });
             },
 
+            queueRender() {
+                if (modelRenderFrame) return;
+                modelRenderFrame = requestAnimationFrame(() => {
+                    modelRenderFrame = null;
+                    this.render();
+                });
+            },
+
             render() {
+                if (modelRenderFrame) {
+                    cancelAnimationFrame(modelRenderFrame);
+                    modelRenderFrame = null;
+                }
                 this.syncDerivedOrientations();
                 for (const layer of this.layers) for (const orientation of ORIENTATIONS) this.normalizeLayerColors(layer.id, orientation.id);
                 this.context.clearRect(0, 0, CANVAS_SIZE, CANVAS_SIZE);
@@ -1014,6 +1361,10 @@ document.addEventListener("alpine:init", () => {
                     voxelHighlightMesh.material.opacity = Math.sin(progress * Math.PI) * 0.9;
                     this.renderVoxelScene();
                     if (progress < 1) voxelHighlightFrame = requestAnimationFrame(pulse);
+                    else {
+                        voxelHighlightFrame = null;
+                        voxelHighlightMesh.material.opacity = 0;
+                    }
                 };
                 voxelHighlightFrame = requestAnimationFrame(pulse);
                 return true;
@@ -1148,7 +1499,9 @@ document.addEventListener("alpine:init", () => {
             createLayer(name) {
                 const id = `layer-${++nextLayerId}`;
                 for (const orientation of ORIENTATIONS) canvases.set(viewKey(orientation.id, id), createLayerCanvas());
-                return { id, name: name || `Layer ${nextLayerId}`, visible: true, depth: layerDepth(this.layers[0]), offset: 0 };
+                const source = this.layers[0];
+                const offset = source ? layerOffset(source) : 0;
+                return { id, name: name || `Layer ${nextLayerId}`, visible: true, depth: source ? clampLayerDepth(source, offset) : 1, offset };
             },
 
             addLayer(name, record = true) {
@@ -1217,31 +1570,79 @@ document.addEventListener("alpine:init", () => {
             },
 
             setLayerDepth(layer, input) {
-                const depth = layerDepth({ depth: input.value });
+                if (input.value === "") return;
+                const requested = Math.trunc(Number(input.value));
+                const candidate = requested === 0 ? (layerDepth(layer) > 0 ? -1 : 1) : requested;
+                const offset = layerOffset(layer);
+                const depth = clampLayerDepth({ depth: candidate }, offset);
                 input.value = depth;
+                const limits = layerDepthLimits(offset);
+                if (depth === limits.max) this.flashPreviewWall("back");
+                else if (depth === limits.min) this.flashPreviewWall("front");
                 if (layerDepth(layer) === depth) return;
-                this.pushHistory();
+                this.recordLayerValueEdit(layer, "depth");
                 layer.depth = depth;
                 this.normalizeLayerOffsets();
                 this.render();
             },
 
             normalizeLayerOffsets() {
-                for (let index = 0; index < this.layers.length; index++) {
-                    const max = index ? layerDepth(this.layers[index - 1]) - layerDepth(this.layers[index]) : 0;
-                    this.layers[index].offset = layerOffset(this.layers[index], max);
+                for (const layer of this.layers) {
+                    layer.depth = layerDepth(layer);
+                    layer.offset = clampLayerOffset(layer, layer.depth);
+                    layer.depth = clampLayerDepth(layer, layer.offset);
                 }
             },
 
             setLayerOffset(layer, input) {
-                const index = this.layers.indexOf(layer);
-                const max = index ? layerDepth(this.layers[index - 1]) - layerDepth(layer) : 0;
-                const offset = layerOffset({ offset: input.value }, max);
+                if (input.value === "") return;
+                const depth = layerDepth(layer);
+                const offset = clampLayerOffset({ offset: input.value }, depth);
                 input.value = offset;
-                if (layerOffset(layer, max) === offset) return;
-                this.pushHistory();
+                const limits = layerOffsetLimits(depth);
+                if (offset === limits.max) this.flashPreviewWall("back");
+                else if (offset === limits.min) this.flashPreviewWall("front");
+                if (layerOffset(layer) === offset) return;
+                this.recordLayerValueEdit(layer, "offset");
                 layer.offset = offset;
                 this.render();
+            },
+
+            beginLayerValueEdit(layer, field) {
+                this.activeLayerId = layer.id;
+                this.editingLayerId = layer.id;
+                if (layerValueEdit?.id !== layer.id || layerValueEdit.field !== field) layerValueEdit = { id: layer.id, field, recorded: false };
+            },
+
+            recordLayerValueEdit(layer, field) {
+                if (layerValueEdit?.id !== layer.id || layerValueEdit.field !== field) {
+                    this.pushHistory();
+                    return;
+                }
+                if (layerValueEdit.recorded) return;
+                this.pushHistory();
+                layerValueEdit.recorded = true;
+            },
+
+            endLayerValueEdit() {
+                layerValueEdit = null;
+                this.editingLayerId = null;
+            },
+
+            layerDepthMin(layer) {
+                return layerDepthLimits(layerOffset(layer)).min;
+            },
+
+            layerDepthMax(layer) {
+                return layerDepthLimits(layerOffset(layer)).max;
+            },
+
+            layerOffsetMin(layer) {
+                return layerOffsetLimits(layerDepth(layer)).min;
+            },
+
+            layerOffsetMax(layer) {
+                return layerOffsetLimits(layerDepth(layer)).max;
             },
 
             beginLayerDrag(id, event) {
@@ -1420,6 +1821,10 @@ document.addEventListener("alpine:init", () => {
                 pointerTarget.setPointerCapture(event.pointerId);
             },
 
+            blurActiveControl() {
+                if (document.activeElement?.matches("input, textarea, select")) document.activeElement.blur();
+            },
+
             hoverStyle() {
                 if (!this.hoverPoint) return {};
                 const size = this.tool === "pencil" || this.tool === "eraser"
@@ -1435,10 +1840,18 @@ document.addEventListener("alpine:init", () => {
 
             renderVoxelCursor() {
                 if (!voxelCursor) return;
+                const rulerCoordinate = this.hoverPoint
+                    ? `${Math.floor(this.hoverPoint.x)}:${Math.floor(this.hoverPoint.y)}`
+                    : null;
+                if (rulerCoordinate !== voxelRulerCoordinate) {
+                    voxelRulerCoordinate = rulerCoordinate;
+                    voxelRulersDirty = true;
+                }
                 voxelCursor.visible = !!this.hoverPoint;
                 voxelCrosshair.visible = !!this.hoverPoint;
                 for (const cursor of voxelMirrorCursors) cursor.visible = false;
                 if (this.hoverPoint) {
+                    const depth = this.voxelLayerDepth();
                     const size = this.tool === "pencil" || this.tool === "eraser"
                         ? Math.max(1, Math.min(16, Number(this.brushSize) || 1))
                         : 1;
@@ -1451,9 +1864,9 @@ document.addEventListener("alpine:init", () => {
                     const cursorColor = luminance > 0.5 ? 0x111315 : 0xffffff;
                     voxelCursor.material.color.set(cursorColor);
                     voxelCrosshair.material.color.set(cursorColor);
-                    voxelCursor.position.set(startX + (size - 1) / 2 - 31.5, 31.5 - startY - (size - 1) / 2, this.voxelLayerDepth() + 0.04);
+                    voxelCursor.position.set(startX + (size - 1) / 2 - 31.5, 31.5 - startY - (size - 1) / 2, depth + 0.04);
                     voxelCursor.scale.set(size, size, 1);
-                    voxelCrosshair.position.set(this.hoverPoint.x - 32, 32 - this.hoverPoint.y, this.voxelLayerDepth() + 0.56);
+                    voxelCrosshair.position.set(this.hoverPoint.x - 32, 32 - this.hoverPoint.y, depth + 0.56);
                     if (this.tool === "pencil" || this.tool === "eraser") {
                         const [verticalCursor, horizontalCursor, combinedCursor] = voxelMirrorCursors;
                         const position = voxelCursor.position;
@@ -1488,6 +1901,9 @@ document.addEventListener("alpine:init", () => {
                     this.clearHover();
                     return;
                 }
+                const rect = this.$refs.canvas.getBoundingClientRect();
+                const inside = event.clientX >= rect.left && event.clientX < rect.right
+                    && event.clientY >= rect.top && event.clientY < rect.bottom;
                 const showGuides = this.tool === "pencil" || this.tool === "eraser" || (this.tool === "selection" && !selectionAnchor);
                 const voxelPoint = this.voxelPointFromEvent(event);
                 if (voxelPoint) {
@@ -1497,9 +1913,6 @@ document.addEventListener("alpine:init", () => {
                     this.renderVoxelCursor();
                     return;
                 }
-                const rect = this.$refs.canvas.getBoundingClientRect();
-                const inside = event.clientX >= rect.left && event.clientX < rect.right
-                    && event.clientY >= rect.top && event.clientY < rect.bottom;
                 const hoverPoint = inside ? {
                     x: (event.clientX - rect.left) * CANVAS_SIZE / rect.width,
                     y: (event.clientY - rect.top) * CANVAS_SIZE / rect.height,
@@ -1513,37 +1926,35 @@ document.addEventListener("alpine:init", () => {
                 return selectionMask?.[maskIndex(point.x, point.y)] === 1;
             },
 
-            startVoxelRotation(event) {
-                if (!voxelRoot) return;
+            startVoxelPan(event) {
                 event.preventDefault();
-                this.clearSelection();
-                cancelAnimationFrame(voxelSnapFrame);
-                voxelSnapFrame = null;
-                voxelRotation = {
+                this.blurActiveControl();
+                if (!voxelCamera || this.voxelZoom <= 1) return;
+                const size = this.$refs.voxelCanvas.getBoundingClientRect();
+                voxelPan = {
                     pointerId: event.pointerId,
                     clientX: event.clientX,
                     clientY: event.clientY,
-                    rotationX: voxelRoot.rotation.x,
-                    rotationY: voxelRoot.rotation.y,
+                    cameraX: voxelCamera.position.x,
+                    cameraY: voxelCamera.position.y,
+                    scaleX: (voxelCamera.right - voxelCamera.left) / (size.width * voxelCamera.zoom),
+                    scaleY: (voxelCamera.top - voxelCamera.bottom) / (size.height * voxelCamera.zoom),
                 };
-                voxelGrid.visible = false;
-                voxelBoundsVisible = true;
-                this.voxelRotating = true;
                 this.capturePointer(event);
-                this.clearHover();
             },
 
-            continueVoxelRotation(event) {
-                if (event.pointerId !== voxelRotation?.pointerId) return;
-                voxelRoot.rotation.x = voxelRotation.rotationX + (event.clientY - voxelRotation.clientY) * 0.01;
-                voxelRoot.rotation.y = voxelRotation.rotationY + (event.clientX - voxelRotation.clientX) * 0.01;
+            continueVoxelPan(event) {
+                if (event.pointerId !== voxelPan?.pointerId || this.voxelZoom <= 1) return;
+                voxelCamera.position.x = voxelPan.cameraX - (event.clientX - voxelPan.clientX) * voxelPan.scaleX;
+                voxelCamera.position.y = voxelPan.cameraY + (event.clientY - voxelPan.clientY) * voxelPan.scaleY;
+                this.clampVoxelCamera();
+                voxelRulersDirty = true;
                 this.renderVoxelScene();
             },
 
-            endVoxelRotation(event) {
-                if (event.pointerId !== voxelRotation?.pointerId) return;
-                voxelRotation = null;
-                this.snapVoxelRotation();
+            endVoxelPan(event) {
+                if (event.pointerId !== voxelPan?.pointerId) return;
+                voxelPan = null;
             },
 
             snapVoxelRotation() {
@@ -1563,8 +1974,6 @@ document.addEventListener("alpine:init", () => {
                         voxelSnapFrame = null;
                         voxelRoot.rotation.set(target.x, target.y, 0);
                         voxelGrid.visible = this.gridVisible;
-                        voxelBoundsVisible = false;
-                        this.voxelRotating = false;
                     }
                     this.renderVoxelScene();
                 };
@@ -1572,8 +1981,9 @@ document.addEventListener("alpine:init", () => {
             },
 
             startPointer(event) {
+                if (event.button === 0) this.blurActiveControl();
                 if (event.button === 1) {
-                    this.startVoxelRotation(event);
+                    this.startVoxelPan(event);
                     return;
                 }
                 if (event.button !== 0) return;
@@ -1587,8 +1997,8 @@ document.addEventListener("alpine:init", () => {
             },
 
             continuePointer(event) {
-                if (voxelRotation) {
-                    this.continueVoxelRotation(event);
+                if (voxelPan) {
+                    this.continueVoxelPan(event);
                     return;
                 }
                 this.updateHover(event);
@@ -1599,7 +2009,7 @@ document.addEventListener("alpine:init", () => {
             },
 
             endPointer(event) {
-                if (voxelRotation) this.endVoxelRotation(event);
+                if (voxelPan) this.endVoxelPan(event);
                 else if (selectionAnchor) this.endSelection(event);
                 else if (moveState) this.endMove(event);
                 else if (this.sampling) this.endEyedropper(event);
@@ -1826,7 +2236,7 @@ document.addEventListener("alpine:init", () => {
                 clearMaskedPixels(context, moveState.mask);
                 context.drawImage(moveState.pixels, selection.x + dx + LAYER_PADDING, selection.y + dy + LAYER_PADDING);
                 this.setSelectionMask(translateMask(moveState.mask, dx, dy));
-                this.render();
+                this.queueRender();
             },
 
             endMove(event) {
@@ -1921,13 +2331,13 @@ document.addEventListener("alpine:init", () => {
                     this.activeContext().putImageData(straightStroke.pixels, 0, 0);
                     this.drawLine(straightStroke.start, lockedPoint);
                     this.lastPoint = lockedPoint;
-                    this.render();
+                    this.queueRender();
                     return;
                 }
                 straightStroke = null;
                 this.drawLine(this.lastPoint, point);
                 this.lastPoint = point;
-                this.render();
+                this.queueRender();
             },
 
             endStroke(event) {
@@ -1959,7 +2369,7 @@ document.addEventListener("alpine:init", () => {
                     canvas.getContext("2d").putImageData(pixels.data, 0, 0);
                     canvases.set(pixels.key, canvas);
                 }
-                this.layers = snapshot.layers.map((layer) => ({ ...layer, depth: layerDepth(layer), offset: Math.max(0, Math.floor(Number(layer.offset) || 0)) }));
+                this.layers = snapshot.layers.map((layer) => ({ ...layer, depth: layerDepth(layer), offset: layerOffset(layer) }));
                 this.normalizeLayerOffsets();
                 this.activeLayerId = snapshot.activeLayerId;
                 editedViews.clear();
@@ -2055,50 +2465,44 @@ document.addEventListener("alpine:init", () => {
             },
 
             handleKeydown(event) {
-                if (event.target.matches("input, textarea")) {
-                    if (event.key === "Escape") event.target.blur();
-                    return;
-                }
+                if (event.isComposing) return;
                 const command = event.ctrlKey || event.metaKey;
                 const key = event.key.toLowerCase();
-                if (command && key === "z") {
+                const run = (action) => {
                     event.preventDefault();
-                    if (event.shiftKey) this.redo();
-                    else this.undo();
+                    this.blurActiveControl();
+                    action();
+                };
+                if (command && key === "z") {
+                    run(() => event.shiftKey ? this.redo() : this.undo());
                     return;
                 }
                 if (command && key === "y") {
-                    event.preventDefault();
-                    this.redo();
+                    run(() => this.redo());
                     return;
                 }
                 if (command && (key === "c" || key === "x")) {
-                    event.preventDefault();
-                    this.copySelection(key === "x");
+                    run(() => this.copySelection(key === "x"));
                     return;
                 }
                 if (command && key === "v" && internalClipboard) {
-                    event.preventDefault();
-                    this.pasteSelection();
+                    run(() => this.pasteSelection());
                     return;
                 }
                 if (command && key === "a") {
-                    event.preventDefault();
-                    this.setSelectionMask(rectangleMask(0, 0, CANVAS_SIZE, CANVAS_SIZE));
+                    run(() => this.setSelectionMask(rectangleMask(0, 0, CANVAS_SIZE, CANVAS_SIZE)));
                     return;
                 }
                 if (command && key === "d") {
-                    event.preventDefault();
-                    this.clearSelection();
+                    run(() => this.clearSelection());
                     return;
                 }
                 if (event.key === "Escape") {
-                    this.clearSelection();
+                    run(() => this.clearSelection());
                     return;
                 }
                 if (event.key === "Delete" || event.key === "Backspace") {
-                    event.preventDefault();
-                    this.clearCanvas();
+                    run(() => this.clearCanvas());
                     return;
                 }
                 const directions = {
@@ -2108,15 +2512,15 @@ document.addEventListener("alpine:init", () => {
                     ArrowDown: [0, 1],
                 };
                 if (this.selection && directions[event.key]) {
-                    event.preventDefault();
                     const distance = event.shiftKey ? 8 : 1;
-                    this.translateSelection(directions[event.key][0] * distance, directions[event.key][1] * distance);
+                    run(() => this.translateSelection(directions[event.key][0] * distance, directions[event.key][1] * distance));
                     return;
                 }
                 if (command || event.altKey) return;
+                if (event.target.closest?.("input, textarea, [contenteditable]")) return;
                 const tools = { b: "pencil", g: "bucket", i: "eyedropper", t: "selection", m: "move", w: "wand", e: "eraser" };
                 const tool = tools[key];
-                if (tool) this.tool = tool;
+                if (tool) run(() => { this.tool = tool; });
             },
 
             async importFiles(fileList, pasted = false) {
@@ -2151,6 +2555,10 @@ document.addEventListener("alpine:init", () => {
             },
 
             handlePaste(event) {
+                if (previewDrag?.mode === "rotate" || voxelPan) {
+                    event.preventDefault();
+                    return;
+                }
                 if (internalClipboard) {
                     event.preventDefault();
                     this.pasteSelection();
