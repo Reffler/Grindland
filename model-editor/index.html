@@ -8,9 +8,9 @@
     <meta http-equiv="Expires" content="0">
     <link rel="icon" href="data:,">
     <title>Model Editor</title>
-    <link rel="stylesheet" href="styles.css?v=20260715-40">
+    <link rel="stylesheet" href="styles.css?v=20260715-45">
     <script defer src="https://unpkg.com/lucide@0.468.0/dist/umd/lucide.min.js"></script>
-    <script defer src="editor.js?v=20260715-68"></script>
+    <script defer src="editor.js?v=20260715-79"></script>
     <script defer src="https://cdn.jsdelivr.net/npm/alpinejs@3.x.x/dist/cdn.min.js"></script>
 </head>
 <body>
@@ -205,10 +205,22 @@
                         </div>
                     </header>
 
-                    <div class="layers-list">
-                        <div class="layer-root-drop layer-root-drop-top" :class="{ active: layerDropTarget === 'root:top' }" x-show="draggedLayerWasGrouped" @dragover.prevent.stop="setRootDrop('top', $event)" @drop.prevent.stop="finishLayerDrag()"></div>
+                    <div class="layers-list" @dragover.prevent="setLayerInterior($event)" @drop.prevent="finishLayerDrag()">
+                        <div class="layer-root-drop layer-root-drop-top" :class="{ active: layerDropTarget === 'root:top' }" x-show="draggedLayerWasGrouped" @dragover.prevent.stop="setRootDrop('top', $event)" @drop.prevent.stop="commitLayerDrop()"></div>
                         <template x-for="entry in layerEntries()" :key="entry.key">
-                            <div class="layer-list-entry" :data-layer-entry="entry.key" :class="{ 'group-member-entry': entry.type === 'layer' && entry.grouped, 'last-group-member': entry.lastInGroup }">
+                            <div
+                                class="layer-list-entry"
+                                :data-layer-entry="entry.key"
+                                :class="{
+                                    'group-member-entry': entry.type === 'layer' && entry.grouped,
+                                    'last-group-member': entry.lastInGroup,
+                                    'drop-before': isLayerDropMarker(entry.key, 'before'),
+                                    'drop-after': isLayerDropMarker(entry.key, 'after'),
+                                    'drop-grouped': isLayerDropMarkerGrouped(entry.key)
+                                }"
+                                @dragover.prevent.stop="setEntryGapDrop(entry.type, entry.type === 'group' ? entry.group.id : entry.layer.id, $event)"
+                                @drop.prevent.stop="commitLayerDrop()"
+                            >
                                 <template x-if="entry.type === 'group'">
                                     <div
                                         class="layer-group-row"
@@ -220,7 +232,7 @@
                                         @click="activateGroup(entry.group.id)"
                                         @dragstart="beginGroupDrag(entry.group.id, $event)"
                                         @dragover.prevent.stop="setGroupDrop(entry.group.id, $event)"
-                                        @drop.prevent.stop="finishLayerDrag()"
+                                        @drop.prevent.stop="commitLayerDrop()"
                                         @dragend="finishLayerDrag()"
                                     >
                                         <button type="button" class="visibility group-visibility" :class="{ muted: !groupVisible(entry.group), partial: groupPartiallyVisible(entry.group) }" :disabled="groupLayerCount(entry.group.id) === 0" @click.stop="toggleGroupVisibility(entry.group)" title="Toggle group visibility" aria-label="Toggle group visibility">
@@ -255,8 +267,8 @@
                                         @click="activateLayer(entry.layer.id)"
                                         @dblclick="selectLayerPixels(entry.layer.id)"
                                         @dragstart="beginLayerDrag(entry.layer.id, $event)"
-                                        @dragover.prevent.stop="setLayerDrop(entry.layer.id, $event)"
-                                        @drop.stop.prevent="finishLayerDrag()"
+                                        @dragover.prevent.stop="setEntryGapDrop('layer', entry.layer.id, $event)"
+                                        @drop.stop.prevent="commitLayerDrop()"
                                         @dragend="finishLayerDrag()"
                                     >
                                         <button type="button" class="visibility" :class="{ muted: !entry.layer.visible }" @click.stop="toggleLayer(entry.layer)" title="Toggle visibility" aria-label="Toggle layer visibility">
@@ -320,7 +332,7 @@
                                 </template>
                             </div>
                         </template>
-                        <div class="layer-root-drop layer-root-drop-bottom" :class="{ active: layerDropTarget === 'root:bottom' }" x-show="draggedLayerWasGrouped" @dragover.prevent.stop="setRootDrop('bottom', $event)" @drop.prevent.stop="finishLayerDrag()"></div>
+                        <div class="layer-root-drop layer-root-drop-bottom" :class="{ active: layerDropTarget === 'root:bottom' }" x-show="draggedLayerWasGrouped" @dragover.prevent.stop="setRootDrop('bottom', $event)" @drop.prevent.stop="commitLayerDrop()"></div>
                     </div>
                 </section>
 

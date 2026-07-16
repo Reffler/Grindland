@@ -659,6 +659,26 @@ button svg {
     cursor: grab;
 }
 
+.layer-list-entry {
+    --layer-drop-indent: 0px;
+
+    position: relative;
+    padding-top: 3px;
+    padding-bottom: 3px;
+}
+
+.layer-list-entry.drop-before {
+    background: linear-gradient(#75ead4, #75ead4) var(--layer-drop-indent) 0 / calc(100% - var(--layer-drop-indent)) 2px no-repeat;
+}
+
+.layer-list-entry.drop-after {
+    background: linear-gradient(#75ead4, #75ead4) var(--layer-drop-indent) 100% / calc(100% - var(--layer-drop-indent)) 2px no-repeat;
+}
+
+.layer-list-entry.drop-grouped {
+    --layer-drop-indent: 14px;
+}
+
 .layer-group-row:hover {
     background: #24282b;
 }
@@ -715,9 +735,20 @@ button svg {
 }
 
 .layer-group-row.drop-inside {
-    border-color: #55d6be;
+    border-color: transparent;
     background: #263c38;
-    box-shadow: inset 0 0 0 1px rgb(85 214 190 / 20%);
+    box-shadow: inset 0 0 12px rgb(85 214 190 / 12%);
+}
+
+.layer-group-row.drop-inside::before {
+    position: absolute;
+    top: 8px;
+    bottom: 8px;
+    left: 2px;
+    width: 3px;
+    border-radius: 2px;
+    background: #75ead4;
+    content: "";
 }
 
 .layer-group-row.drop-inside .group-icon {
@@ -764,6 +795,7 @@ button svg {
     border-radius: 2px;
     background: #477e75;
     content: "";
+    opacity: 0;
 }
 
 .layer-root-drop::after {
@@ -774,14 +806,17 @@ button svg {
     border-bottom: 5px solid transparent;
     border-left: 7px solid #477e75;
     content: "";
+    opacity: 0;
 }
 
 .layer-root-drop.active::before {
     background: #75ead4;
+    opacity: 1;
 }
 
 .layer-root-drop.active::after {
     border-left-color: #75ead4;
+    opacity: 1;
 }
 
 .layer-row {
@@ -812,7 +847,6 @@ button svg {
 }
 
 .group-member-entry {
-    position: relative;
     padding-left: 14px;
 }
 
@@ -835,7 +869,15 @@ button svg {
 }
 
 .group-member-entry.last-group-member::before {
-    bottom: 50%;
+    bottom: calc(100% - 38px);
+}
+
+.group-member-entry.last-group-member {
+    padding-bottom: 10px;
+}
+
+.group-member-entry.last-group-member::after {
+    top: 38px;
 }
 
 .visibility {

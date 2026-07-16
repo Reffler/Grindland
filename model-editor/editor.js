@@ -305,6 +305,7 @@ document.addEventListener("alpine:init", () => {
             activeGroupId: null,
             draggedLayerId: null,
             draggedLayerWasGrouped: false,
+            draggedLayerOriginalGroupId: null,
             draggedGroupId: null,
             editingLayerId: null,
             editingGroupId: null,
@@ -1628,6 +1629,21 @@ document.addEventListener("alpine:init", () => {
                 if (group) group.position = Math.max(0, Math.min(this.layers.length, position));
             },
 
+            emptyGroupAnchors(excludedId = null) {
+                const occupied = new Set(this.layers.map((layer) => layer.groupId).filter(Boolean));
+                return this.groups
+                    .filter((group) => group.id !== excludedId && !occupied.has(group.id))
+                    .map((group) => ({ group, position: Math.max(0, Math.min(this.layers.length, group.position ?? 0)) }));
+            },
+
+            rebaseEmptyGroupAnchors(anchors, removedIndex, insertionIndex, insertBeforeEqual) {
+                for (const anchor of anchors) {
+                    let position = anchor.position - (anchor.position > removedIndex ? 1 : 0);
+                    if (position > insertionIndex || (insertBeforeEqual && position === insertionIndex)) position++;
+                    anchor.group.position = Math.max(0, Math.min(this.layers.length, position));
+                }
+            },
+
             groupVisible(group) {
                 return this.layers.some((layer) => layer.groupId === group.id && layer.visible);
             },
@@ -1839,7 +1855,8 @@ document.addEventListener("alpine:init", () => {
                     return;
                 }
                 this.draggedLayerId = id;
-                this.draggedLayerWasGrouped = !!this.layers.find((layer) => layer.id === id)?.groupId;
+                this.draggedLayerOriginalGroupId = this.layers.find((layer) => layer.id === id)?.groupId ?? null;
+                this.draggedLayerWasGrouped = !!this.draggedLayerOriginalGroupId;
                 this.draggedGroupId = null;
                 this.layerDragChanged = false;
                 event.dataTransfer.effectAllowed = "move";
@@ -1854,6 +1871,7 @@ document.addEventListener("alpine:init", () => {
                 }
                 this.draggedLayerId = null;
                 this.draggedLayerWasGrouped = false;
+                this.draggedLayerOriginalGroupId = null;
                 this.draggedGroupId = id;
                 this.layerDragChanged = false;
                 event.dataTransfer.effectAllowed = "move";
@@ -1861,45 +1879,179 @@ document.addEventListener("alpine:init", () => {
                 event.dataTransfer.setDragImage(transparentDragImage, 0, 0);
             },
 
-            setLayerDrop(targetId, event) {
-                if ((!this.draggedLayerId && !this.draggedGroupId) || this.draggedLayerId === targetId) return;
-                const target = this.layers.find((layer) => layer.id === targetId);
-                if (this.draggedGroupId && target?.groupId === this.draggedGroupId) {
-                    this.layerDropTarget = null;
-                    this.layerDropPosition = null;
+            setEntryGapDrop(type, targetId, event) {
+                if (!this.draggedLayerId && !this.draggedGroupId) return;
+                if (this.draggedGroupId === targetId) {
+                    this.setLayerInterior(event);
                     return;
                 }
                 const bounds = event.currentTarget.getBoundingClientRect();
                 const position = event.clientY < bounds.top + bounds.height / 2 ? "before" : "after";
+                if (type === "group") {
+                    this.layerDropTarget = `group:${targetId}`;
+                    this.layerDropPosition = position;
+                    this.validateLayerDrop(event);
+                    return;
+                }
+                const target = this.layers.find((layer) => layer.id === targetId);
+                if (this.draggedLayerId === targetId) {
+                    this.setLayerInterior(event);
+                    return;
+                }
+                if (this.draggedGroupId && target?.groupId === this.draggedGroupId) {
+                    this.setLayerInterior(event);
+                    return;
+                }
+                if (this.draggedGroupId && target?.groupId) {
+                    const members = this.layers.filter((layer) => layer.groupId === target.groupId);
+                    const groupBoundary = position === "before" ? target === members[0] : target === members.at(-1);
+                    if (!groupBoundary) {
+                        this.setLayerInterior(event);
+                        return;
+                    }
+                    this.layerDropTarget = `group:${target.groupId}`;
+                    this.layerDropPosition = position;
+                    this.validateLayerDrop(event);
+                    return;
+                }
                 const dragged = this.layers.find((layer) => layer.id === this.draggedLayerId);
                 const members = target?.groupId ? this.layers.filter((layer) => layer.groupId === target.groupId) : [];
                 const boundary = (position === "before" && target === members[0]) || (position === "after" && target === members.at(-1));
-                const outdented = dragged?.groupId === target?.groupId && event.clientX < bounds.left + 34;
-                const outside = !!(dragged && target?.groupId && boundary && (dragged.groupId !== target.groupId || outdented));
-                this.layerDropTarget = `layer:${targetId}`;
-                this.layerDropPosition = outside ? `${position}-group` : position;
-                event.dataTransfer.dropEffect = "move";
-                this.dropOnLayer(targetId, false);
+                const outdented = event.clientX < bounds.left + 34;
+                const outside = !!(dragged && target?.groupId && boundary && (outdented || dragged.groupId !== target.groupId));
+                this.layerDropTarget = outside ? `group:${target.groupId}` : `layer:${targetId}`;
+                this.layerDropPosition = outside && dragged.groupId !== target.groupId ? "after" : position;
+                this.validateLayerDrop(event);
+            },
+
+            setLayerInterior(event) {
+                this.layerDropTarget = null;
+                this.layerDropPosition = null;
+                event.dataTransfer.dropEffect = "none";
             },
 
             setGroupDrop(targetId, event) {
-                if ((!this.draggedLayerId && !this.draggedGroupId) || this.draggedGroupId === targetId) return;
+                if ((!this.draggedLayerId && !this.draggedGroupId) || this.draggedGroupId === targetId) {
+                    this.setLayerInterior(event);
+                    return;
+                }
                 const bounds = event.currentTarget.getBoundingClientRect();
                 const ratio = (event.clientY - bounds.top) / bounds.height;
                 this.layerDropTarget = `group:${targetId}`;
-                this.layerDropPosition = this.draggedLayerId && ratio >= 0.34 && ratio <= 0.66
+                this.layerDropPosition = this.draggedLayerId && ratio >= 0.25 && ratio <= 0.75
                     ? "inside"
                     : ratio < 0.5 ? "before" : "after";
-                event.dataTransfer.dropEffect = "move";
-                this.dropOnGroup(targetId, false);
+                this.validateLayerDrop(event);
             },
 
             setRootDrop(position, event) {
                 if (!this.draggedLayerId || !this.draggedLayerWasGrouped) return;
                 this.layerDropTarget = `root:${position}`;
                 this.layerDropPosition = "outside";
-                event.dataTransfer.dropEffect = "move";
-                this.moveDraggedLayerToRoot(position, false);
+                this.validateLayerDrop(event);
+            },
+
+            validateLayerDrop(event) {
+                if (this.layerDropWouldChange()) {
+                    event.dataTransfer.dropEffect = "move";
+                    return;
+                }
+                this.setLayerInterior(event);
+            },
+
+            layerDropWouldChange() {
+                const [targetType, targetId] = this.layerDropTarget?.split(":") ?? [];
+                const position = this.layerDropPosition;
+                if (!targetType || !position) return false;
+                if (this.draggedLayerId) {
+                    const layer = this.layers.find((candidate) => candidate.id === this.draggedLayerId);
+                    if (!layer) return false;
+                    if (targetType === "root") {
+                        const index = this.layers.indexOf(layer);
+                        return !!layer.groupId || (targetId === "top" ? index !== 0 : index !== this.layers.length - 1);
+                    }
+                    if (targetType === "layer") {
+                        const target = this.layers.find((candidate) => candidate.id === targetId);
+                        if (!target || target === layer) return false;
+                        const from = this.layers.indexOf(layer);
+                        const targetIndex = this.layers.indexOf(target);
+                        const adjacent = position === "after" ? from === targetIndex + 1 : from === targetIndex - 1;
+                        return layer.groupId !== (target.groupId ?? null) || !adjacent;
+                    }
+                    if (targetType === "group") {
+                        const group = this.groups.find((candidate) => candidate.id === targetId);
+                        if (!group) return false;
+                        const members = this.layers.filter((candidate) => candidate.groupId === targetId);
+                        if (position === "inside") return layer.groupId !== targetId || layer !== members.at(-1) || group.collapsed;
+                        const groupPosition = Math.max(0, Math.min(this.layers.length, group.position ?? 0));
+                        const firstIndex = members.length ? this.layers.indexOf(members[0]) : groupPosition;
+                        const lastIndex = members.length ? this.layers.indexOf(members.at(-1)) : groupPosition - 1;
+                        const layerIndex = this.layers.indexOf(layer);
+                        return !!layer.groupId || (position === "before" ? layerIndex !== firstIndex - 1 : layerIndex !== lastIndex + 1);
+                    }
+                    return false;
+                }
+                const groupId = this.draggedGroupId;
+                if (!groupId || targetType === "root" || (targetType === "group" && groupId === targetId)) return false;
+                const targetLayer = targetType === "layer" ? this.layers.find((layer) => layer.id === targetId) : null;
+                if (targetType === "layer" && (!targetLayer || targetLayer.groupId === groupId)) return false;
+                const members = this.layers.filter((layer) => layer.groupId === groupId);
+                const firstMemberIndex = members.length ? this.layers.indexOf(members[0]) : -1;
+                const lastMemberIndex = members.length ? this.layers.indexOf(members.at(-1)) : -1;
+                const targetMembers = targetType === "group"
+                    ? this.layers.filter((layer) => layer.groupId === targetId)
+                    : targetLayer.groupId ? this.layers.filter((layer) => layer.groupId === targetLayer.groupId) : [targetLayer];
+                const firstTargetIndex = targetMembers.length ? this.layers.indexOf(targetMembers[0]) : -1;
+                const lastTargetIndex = targetMembers.length ? this.layers.indexOf(targetMembers.at(-1)) : -1;
+                const targetGroup = targetType === "group" ? this.groups.find((group) => group.id === targetId) : null;
+                const emptyPosition = firstTargetIndex >= 0
+                    ? position === "before" ? firstTargetIndex : lastTargetIndex + 1
+                    : Math.max(0, Math.min(this.layers.length, targetGroup?.position ?? 0));
+                if (members.length && firstTargetIndex >= 0) {
+                    return position === "before" ? lastMemberIndex + 1 !== firstTargetIndex : lastTargetIndex + 1 !== firstMemberIndex;
+                }
+                const group = this.groups.find((candidate) => candidate.id === groupId);
+                if (members.length || group?.position !== emptyPosition) return true;
+                if (targetType !== "group") return false;
+                const from = this.groups.findIndex((candidate) => candidate.id === groupId);
+                const to = this.groups.findIndex((candidate) => candidate.id === targetId);
+                return position === "before" ? from !== to - 1 : from !== to + 1;
+            },
+
+            layerDropMarker() {
+                if (!this.layerDropPosition || !["before", "after"].includes(this.layerDropPosition)) return null;
+                let target = this.layerDropTarget;
+                if (this.layerDropPosition === "after" && target?.startsWith("group:")) {
+                    const groupId = target.slice(6);
+                    const group = this.groups.find((candidate) => candidate.id === groupId);
+                    const members = this.layers.filter((layer) => layer.groupId === groupId);
+                    if (!group?.collapsed && members.length) target = `layer:${members.at(-1).id}`;
+                }
+                if (this.layerDropPosition === "after") {
+                    const entries = this.layerEntries();
+                    const index = entries.findIndex((entry) => entry.key === target);
+                    if (index >= 0 && entries[index + 1]) return { key: entries[index + 1].key, position: "before" };
+                }
+                return { key: target, position: this.layerDropPosition };
+            },
+
+            isLayerDropMarker(entryKey, position) {
+                const marker = this.layerDropMarker();
+                return marker?.key === entryKey && marker.position === position;
+            },
+
+            isLayerDropMarkerGrouped(entryKey) {
+                if (!this.draggedLayerId || !this.layerDropTarget?.startsWith("layer:")) return false;
+                const target = this.layers.find((layer) => `layer:${layer.id}` === this.layerDropTarget);
+                return !!target?.groupId && (this.isLayerDropMarker(entryKey, "before") || this.isLayerDropMarker(entryKey, "after"));
+            },
+
+            commitLayerDrop() {
+                const [type, targetId] = this.layerDropTarget?.split(":") ?? [];
+                if (type === "layer") this.dropOnLayer(targetId);
+                else if (type === "group") this.dropOnGroup(targetId);
+                else if (type === "root") this.moveDraggedLayerToRoot(targetId);
+                else this.finishLayerDrag();
             },
 
             recordLayerDrag() {
@@ -1964,11 +2116,14 @@ document.addEventListener("alpine:init", () => {
                 this.recordLayerDrag();
                 const positions = this.captureLayerPositions();
                 const previousGroupId = layer.groupId;
+                const emptyGroupAnchors = this.emptyGroupAnchors();
                 this.layers.splice(from, 1);
                 const nextTargetIndex = this.layers.indexOf(target);
+                const insertionIndex = nextTargetIndex + (this.layerDropPosition?.startsWith("after") ? 1 : 0);
                 layer.groupId = desiredGroupId;
-                this.layers.splice(nextTargetIndex + (this.layerDropPosition?.startsWith("after") ? 1 : 0), 0, layer);
-                this.positionEmptyGroup(previousGroupId, from);
+                this.layers.splice(insertionIndex, 0, layer);
+                this.rebaseEmptyGroupAnchors(emptyGroupAnchors, from, insertionIndex, this.layerDropPosition?.startsWith("after"));
+                this.positionEmptyGroup(previousGroupId, from + (insertionIndex < from ? 1 : 0));
                 this.activeGroupId = null;
                 this.normalizeLayerOffsets();
                 this.render();
@@ -1991,8 +2146,9 @@ document.addEventListener("alpine:init", () => {
                 }
                 const currentMembers = this.layers.filter((candidate) => candidate.groupId === targetId);
                 const layerIndex = this.layers.indexOf(layer);
-                const firstIndex = currentMembers.length ? this.layers.indexOf(currentMembers[0]) : 0;
-                const lastIndex = currentMembers.length ? this.layers.indexOf(currentMembers.at(-1)) : -1;
+                const groupPosition = Math.max(0, Math.min(this.layers.length, group.position ?? 0));
+                const firstIndex = currentMembers.length ? this.layers.indexOf(currentMembers[0]) : groupPosition;
+                const lastIndex = currentMembers.length ? this.layers.indexOf(currentMembers.at(-1)) : groupPosition - 1;
                 const settled = this.layerDropPosition === "inside"
                     ? layer.groupId === targetId && layer === currentMembers.at(-1) && !group.collapsed
                     : !layer.groupId && (this.layerDropPosition === "before" ? layerIndex === firstIndex - 1 : layerIndex === lastIndex + 1);
@@ -2004,23 +2160,31 @@ document.addEventListener("alpine:init", () => {
                 const positions = this.captureLayerPositions();
                 const previousGroupId = layer.groupId;
                 const previousIndex = this.layers.indexOf(layer);
+                const emptyGroupAnchors = this.emptyGroupAnchors(targetId);
                 this.layers.splice(this.layers.indexOf(layer), 1);
+                const emptiedTarget = currentMembers.length === 1 && currentMembers[0] === layer;
+                const emptyTargetPosition = emptiedTarget
+                    ? Math.min(previousIndex, this.layers.length)
+                    : Math.max(0, Math.min(this.layers.length, groupPosition - (!currentMembers.length && previousIndex < groupPosition ? 1 : 0)));
                 const memberIndexes = this.layers
                     .map((candidate, index) => candidate.groupId === targetId ? index : -1)
                     .filter((index) => index >= 0);
+                let insertionIndex;
                 if (this.layerDropPosition === "inside") {
                     layer.groupId = targetId;
-                    this.layers.splice(memberIndexes.length ? memberIndexes.at(-1) + 1 : Math.max(0, Math.min(this.layers.length, group.position ?? 0)), 0, layer);
+                    insertionIndex = memberIndexes.length ? memberIndexes.at(-1) + 1 : emptyTargetPosition;
+                    this.layers.splice(insertionIndex, 0, layer);
                     group.collapsed = false;
                 } else {
                     layer.groupId = null;
-                    const index = memberIndexes.length
+                    insertionIndex = memberIndexes.length
                         ? this.layerDropPosition === "before" ? memberIndexes[0] : memberIndexes.at(-1) + 1
-                        : Math.max(0, Math.min(this.layers.length, group.position ?? 0));
-                    this.layers.splice(index, 0, layer);
-                    if (!memberIndexes.length) group.position = index + (this.layerDropPosition === "before" ? 1 : 0);
+                        : emptyTargetPosition;
+                    this.layers.splice(insertionIndex, 0, layer);
+                    if (!memberIndexes.length) group.position = insertionIndex + (this.layerDropPosition === "before" ? 1 : 0);
                 }
-                if (previousGroupId !== targetId) this.positionEmptyGroup(previousGroupId, previousIndex);
+                this.rebaseEmptyGroupAnchors(emptyGroupAnchors, previousIndex, insertionIndex, this.layerDropPosition !== "before");
+                if (previousGroupId !== targetId) this.positionEmptyGroup(previousGroupId, previousIndex + (insertionIndex < previousIndex ? 1 : 0));
                 this.activeGroupId = null;
                 this.normalizeLayerOffsets();
                 this.render();
@@ -2109,10 +2273,13 @@ document.addEventListener("alpine:init", () => {
                 this.recordLayerDrag();
                 const positions = this.captureLayerPositions();
                 const previousGroupId = layer.groupId;
+                const emptyGroupAnchors = this.emptyGroupAnchors();
                 this.layers.splice(this.layers.indexOf(layer), 1);
                 layer.groupId = null;
-                this.layers.splice(position === "top" ? 0 : this.layers.length, 0, layer);
-                this.positionEmptyGroup(previousGroupId, currentIndex);
+                const insertionIndex = position === "top" ? 0 : this.layers.length;
+                this.layers.splice(insertionIndex, 0, layer);
+                this.rebaseEmptyGroupAnchors(emptyGroupAnchors, currentIndex, insertionIndex, position === "top");
+                this.positionEmptyGroup(previousGroupId, currentIndex + (insertionIndex < currentIndex ? 1 : 0));
                 this.activeGroupId = null;
                 this.activeLayerId = layer.id;
                 this.normalizeLayerOffsets();
@@ -2125,6 +2292,7 @@ document.addEventListener("alpine:init", () => {
             finishLayerDrag() {
                 this.draggedLayerId = null;
                 this.draggedLayerWasGrouped = false;
+                this.draggedLayerOriginalGroupId = null;
                 this.draggedGroupId = null;
                 this.layerDragChanged = false;
                 this.layerDropTarget = null;
