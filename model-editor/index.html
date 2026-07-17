@@ -8,15 +8,14 @@
     <meta http-equiv="Expires" content="0">
     <link rel="icon" href="data:,">
     <title>Model Editor</title>
-    <link rel="stylesheet" href="styles.css?v=20260715-45">
-    <script defer src="https://unpkg.com/lucide@0.468.0/dist/umd/lucide.min.js"></script>
-    <script defer src="editor.js?v=20260715-79"></script>
+    <link rel="stylesheet" href="styles.css?v=20260715-60">
+    <script defer src="https://unpkg.com/lucide@1.24.0/dist/umd/lucide.min.js"></script>
+    <script defer src="editor.js?v=20260715-111"></script>
     <script defer src="https://cdn.jsdelivr.net/npm/alpinejs@3.x.x/dist/cdn.min.js"></script>
 </head>
 <body>
-    <main x-data="pixelEditor" x-init="init()" @paste.window="handlePaste($event)" @keydown.window="handleKeydown($event)" x-cloak>
-        <header class="topbar">
-            <nav class="tools" aria-label="Drawing tools">
+    <main x-data="pixelEditor" x-init="init()" @paste.window="handlePaste($event)" @keydown.window="handleKeydown($event)" @pointerdown.window="closeContextMenus($event)" x-cloak>
+        <nav class="topbar tools" aria-label="Drawing tools">
                 <div class="tool-group">
                     <button type="button" :class="{ active: tool === 'pencil' }" @click="tool = 'pencil'" title="Pencil" aria-label="Pencil">
                         <i data-lucide="pencil"></i>
@@ -41,9 +40,14 @@
                     </button>
                 </div>
 
-                <label class="brush-size" x-show="tool === 'pencil' || tool === 'eraser'">
+                <label class="brush-size" x-show="tool === 'pencil'">
                     <span>Size</span>
-                    <input type="number" min="1" max="16" x-model.number="brushSize" aria-label="Brush size value">
+                    <input type="number" min="1" max="16" x-model.number="pencilSize" aria-label="Pencil size value">
+                </label>
+
+                <label class="brush-size" x-show="tool === 'eraser'">
+                    <span>Size</span>
+                    <input type="number" min="1" max="16" x-model.number="eraserSize" aria-label="Eraser size value">
                 </label>
 
                 <label class="wand-tolerance" x-show="tool === 'wand' || tool === 'bucket'">
@@ -51,8 +55,16 @@
                     <input type="number" min="0" max="255" x-model.number="wandTolerance" aria-label="Magic Wand tolerance value">
                 </label>
 
-            </nav>
-        </header>
+                <label class="color-control" title="Color">
+                    <input type="color" x-model="color" aria-label="Drawing color">
+                </label>
+                <div class="topbar-swatches" aria-label="Active palette swatches">
+                    <template x-for="swatch in activePaletteColors()" :key="swatch">
+                        <button type="button" class="swatch" :class="{ selected: color === swatch }" :style="`--swatch: ${swatch}`" @click="highlightPaletteColor(swatch); color = swatch; tool = 'pencil'" @dblclick="togglePaletteColorSelection(swatch, $event.shiftKey)" :title="swatch" :aria-label="`Use ${swatch}`"></button>
+                    </template>
+                </div>
+
+        </nav>
 
         <div class="editor-body">
             <section
@@ -98,7 +110,7 @@
                             </button>
                         </div>
                     </div>
-                    <div class="canvas-frame">
+                    <div class="canvas-frame" @contextmenu="openCanvasMenu($event)">
                         <canvas
                             x-ref="canvas"
                             width="64"
@@ -111,7 +123,6 @@
                             @pointerleave="clearHover()"
                             @mousedown.middle.prevent
                             @auxclick.prevent
-                            @contextmenu.prevent
                             aria-label="64 by 64 pixel drawing canvas"
                         ></canvas>
                         <canvas x-ref="voxelCanvas" class="voxel-canvas" aria-hidden="true"></canvas>
@@ -136,12 +147,21 @@
                             aria-hidden="true"
                         ></div>
                         <div class="pixel-cursor" x-show="hoverPoint && !voxelReady" :style="hoverStyle()" aria-hidden="true"></div>
+                        <div class="canvas-context-menu" x-show="canvasMenu" :style="canvasMenu ? { left: `${canvasMenu.x}px`, top: `${canvasMenu.y}px` } : {}" @pointerdown.stop>
+                            <button type="button" :disabled="!selection" @click="flipSelection('horizontal')">
+                                <i data-lucide="flip-horizontal-2"></i>
+                                <span>Flip horizontally</span>
+                            </button>
+                            <button type="button" :disabled="!selection" @click="flipSelection('vertical')">
+                                <i data-lucide="flip-vertical-2"></i>
+                                <span>Flip vertically</span>
+                            </button>
+                        </div>
                     </div>
                     <div class="canvas-zoom">
                         <output x-text="`${voxelZoom.toFixed(1)}x`" aria-label="Canvas zoom"></output>
                     </div>
-                    <div class="preview-column">
-                        <div class="preview-presets" role="group" aria-label="Preview controls">
+                    <div class="preview-presets" role="group" aria-label="Preview controls">
                             <button type="button" class="preview-origin" @click="resetPreviewPosition()" title="Return to origin" aria-label="Return preview to origin">
                                 <i data-lucide="crosshair"></i>
                             </button>
@@ -151,14 +171,23 @@
                             <button type="button" :class="{ active: previewPreset === 'front' }" @click="setPreviewView('front')" title="Front view" aria-label="Front view">
                                 <i data-lucide="square"></i>
                             </button>
+                            <button type="button" :class="{ active: previewPreset === 'back' }" @click="setPreviewView('back')" title="Back view" aria-label="Back view">
+                                <i data-lucide="square-dashed"></i>
+                            </button>
                             <button type="button" :class="{ active: previewPreset === 'right' }" @click="setPreviewView('right')" title="Right view" aria-label="Right view">
                                 <i data-lucide="panel-right"></i>
+                            </button>
+                            <button type="button" :class="{ active: previewPreset === 'left' }" @click="setPreviewView('left')" title="Left view" aria-label="Left view">
+                                <i data-lucide="panel-left"></i>
                             </button>
                             <button type="button" :class="{ active: previewPreset === 'top' }" @click="setPreviewView('top')" title="Top view" aria-label="Top view">
                                 <i data-lucide="panel-top"></i>
                             </button>
-                        </div>
-                        <div class="future-window">
+                            <button type="button" :class="{ active: previewPreset === 'bottom' }" @click="setPreviewView('bottom')" title="Bottom view" aria-label="Bottom view">
+                                <i data-lucide="panel-bottom"></i>
+                            </button>
+                    </div>
+                    <div class="future-window">
                             <canvas
                                 x-ref="previewCanvas"
                                 class="model-preview"
@@ -171,7 +200,6 @@
                                 @contextmenu.prevent
                                 aria-label="Pannable, rotatable, and zoomable model preview"
                             ></canvas>
-                        </div>
                     </div>
                 </div>
                 <div class="drop-indicator" x-show="dropActive" aria-hidden="true">
@@ -183,6 +211,15 @@
                 <section class="layers-section">
                     <header class="model-editor-header">
                         <h1>Model Editor</h1>
+                        <div class="model-file-actions">
+                            <button type="button" @click="saveProject()" title="Save model project" aria-label="Save model project">
+                                <i data-lucide="save"></i>
+                            </button>
+                            <button type="button" @click="$refs.projectInput.click()" title="Load model project" aria-label="Load model project">
+                                <i data-lucide="folder-open"></i>
+                            </button>
+                            <input x-ref="projectInput" class="file-input" type="file" accept=".grindland,application/json" @change="loadProject($event.target.files[0]); $event.target.value = ''">
+                        </div>
                     </header>
                     <header class="layers-header">
                         <div class="layer-actions">
@@ -191,7 +228,7 @@
                             </button>
                             <input x-ref="fileInput" class="file-input" type="file" accept="image/*" multiple @change="importFiles($event.target.files); $event.target.value = ''">
                             <button type="button" @click="addLayer()" title="New layer" aria-label="New layer">
-                                <i data-lucide="plus"></i>
+                                <i data-lucide="sticky-note-plus"></i>
                             </button>
                             <button type="button" @click="createGroup()" title="New group" aria-label="New layer group">
                                 <i data-lucide="folder-plus"></i>
@@ -199,7 +236,7 @@
                             <button type="button" @click="duplicateLayer()" :disabled="!activeLayerId" title="Duplicate layer" aria-label="Duplicate layer">
                                 <i data-lucide="copy"></i>
                             </button>
-                            <button type="button" @click="removeLayerOrGroup()" :disabled="!activeGroupId && (!activeLayerId || layers.length <= 1)" title="Delete layer or group" aria-label="Delete layer or group">
+                            <button type="button" @click="removeLayerOrGroup()" :disabled="!activeGroupId && !activeLayerId" title="Delete layer or group" aria-label="Delete layer or group">
                                 <i data-lucide="trash-2"></i>
                             </button>
                         </div>
@@ -261,10 +298,12 @@
                                         class="layer-row"
                                         :class="{
                                             active: activeLayerId === entry.layer.id,
+                                            selected: isLayerSelected(entry.layer.id),
                                             grouped: entry.grouped
                                         }"
                                         :draggable="editingLayerId !== entry.layer.id"
-                                        @click="activateLayer(entry.layer.id)"
+                                        @click="selectLayer(entry.layer.id, $event)"
+                                        @contextmenu="openLayerMenu(entry.layer.id, $event)"
                                         @dblclick="selectLayerPixels(entry.layer.id)"
                                         @dragstart="beginLayerDrag(entry.layer.id, $event)"
                                         @dragover.prevent.stop="setEntryGapDrop('layer', entry.layer.id, $event)"
@@ -281,7 +320,8 @@
                                             class="layer-name"
                                             x-model="entry.layer.name"
                                             draggable="false"
-                                            @pointerdown.stop="activeLayerId = entry.layer.id; activeGroupId = null; editingLayerId = entry.layer.id"
+                                            @pointerdown.stop="selectLayer(entry.layer.id, $event); editingLayerId = entry.layer.id"
+                                            @click.stop
                                             @focus="editingLayerId = entry.layer.id"
                                             @blur="editingLayerId = null"
                                             @dblclick.stop
@@ -337,18 +377,10 @@
                 </section>
 
                 <section class="palette-panel">
-                    <header class="palette-header">
-                        <h2>Present Colors</h2>
-                        <div class="palette-current">
-                            <label class="color-control" title="Color">
-                                <input type="color" x-model="color" aria-label="Drawing color">
-                            </label>
-                        </div>
-                    </header>
                     <div class="palette-content">
                         <div class="palette-control">
                             <div class="quantization">
-                                <span>Colors</span>
+                                <span>Color Quantizer</span>
                                 <input
                                     type="range"
                                     min="1"
@@ -357,7 +389,7 @@
                                     :disabled="!activeLayerId"
                                     @pointerdown="beginQuantization()"
                                     @input="quantizeActiveLayer($event.target.value)"
-                                    aria-label="Color quantization"
+                                    aria-label="Color Quantizer"
                                 >
                                 <output x-text="quantization"></output>
                                 <button
@@ -380,21 +412,22 @@
                                         </template>
                                     </select>
                                     <button type="button" @click="$refs.paletteInput.click()" title="Import GPL palette" aria-label="Import GPL palette">
-                                        <i data-lucide="upload"></i>
+                                        <i data-lucide="palette"></i>
                                     </button>
                                     <input x-ref="paletteInput" class="file-input" type="file" accept=".gpl,text/plain" @change="importPaletteFile($event.target.files[0]); $event.target.value = ''">
                                     <span x-text="`${activePaletteColors().length} colors`"></span>
                                 </header>
-                                <div class="swatches" aria-label="Active palette swatches">
-                                    <template x-for="swatch in activePaletteColors()" :key="swatch">
-                                        <button type="button" class="swatch" :class="{ selected: color === swatch }" :style="`--swatch: ${swatch}`" @click="highlightPaletteColor(swatch); color = swatch; tool = 'pencil'" :title="swatch" :aria-label="`Use ${swatch}`"></button>
-                                    </template>
-                                </div>
                             </section>
                         </div>
                     </div>
                 </section>
             </aside>
+        </div>
+        <div class="layer-context-menu" x-show="layerMenu" :style="layerMenu ? { left: `${layerMenu.x}px`, top: `${layerMenu.y}px` } : {}" @pointerdown.stop>
+            <button type="button" @click="mergeSelectedLayers()">
+                <i data-lucide="layers-2"></i>
+                <span>Merge layers</span>
+            </button>
         </div>
     </main>
 </body>

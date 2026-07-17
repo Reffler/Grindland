@@ -66,6 +66,19 @@ function createLayerCanvas() {
     return canvas;
 }
 
+function encodeImageData(image) {
+    let binary = "";
+    for (let offset = 0; offset < image.data.length; offset += 0x8000) binary += String.fromCharCode(...image.data.subarray(offset, offset + 0x8000));
+    return btoa(binary);
+}
+
+function decodeImageData(encoded) {
+    const binary = atob(encoded);
+    const data = new Uint8ClampedArray(binary.length);
+    for (let index = 0; index < binary.length; index++) data[index] = binary.charCodeAt(index);
+    return new ImageData(data, LAYER_SIZE, LAYER_SIZE);
+}
+
 async function decodeImage(file) {
     if (window.createImageBitmap) return createImageBitmap(file);
     const url = URL.createObjectURL(file);
@@ -81,6 +94,42 @@ async function decodeImage(file) {
         };
         image.src = url;
     });
+}
+
+function canvasBlob(canvas, type, quality) {
+    return new Promise((resolve) => canvas.toBlob(resolve, type, quality));
+}
+
+function blobDataUrl(blob) {
+    return new Promise((resolve, reject) => {
+        const reader = new FileReader();
+        reader.onload = () => resolve(reader.result);
+        reader.onerror = reject;
+        reader.readAsDataURL(blob);
+    });
+}
+
+async function blobImageData(blob) {
+    const image = await decodeImage(blob);
+    const canvas = createLayerCanvas();
+    canvas.getContext("2d", CANVAS_CONTEXT_OPTIONS).drawImage(image, 0, 0, LAYER_SIZE, LAYER_SIZE);
+    image.close?.();
+    return canvas.getContext("2d", CANVAS_CONTEXT_OPTIONS).getImageData(0, 0, LAYER_SIZE, LAYER_SIZE);
+}
+
+async function encodeLosslessTexture(image) {
+    const canvas = createLayerCanvas();
+    canvas.getContext("2d", CANVAS_CONTEXT_OPTIONS).putImageData(image, 0, 0);
+    const webp = await canvasBlob(canvas, "image/webp", 1);
+    if (webp?.type === "image/webp") {
+        const decoded = await blobImageData(webp);
+        if (decoded.data.every((channel, index) => channel === image.data[index])) return blobDataUrl(webp);
+    }
+    return blobDataUrl(await canvasBlob(canvas, "image/png"));
+}
+
+async function decodeTexture(dataUrl) {
+    return blobImageData(await (await fetch(dataUrl)).blob());
 }
 
 function rectangleMask(x, y, width, height) {
@@ -151,6 +200,15 @@ function selectionPixels(source, mask, bounds) {
         const offset = (y * bounds.width + x) * 4;
         pixels.data[offset] = pixels.data[offset + 1] = pixels.data[offset + 2] = pixels.data[offset + 3] = 0;
     }
+    context.putImageData(pixels, 0, 0);
+    return canvas;
+}
+
+function maskedLayerPixels(source, mask) {
+    const canvas = createLayerCanvas();
+    const context = canvas.getContext("2d", CANVAS_CONTEXT_OPTIONS);
+    const pixels = source.getContext("2d").getImageData(0, 0, LAYER_SIZE, LAYER_SIZE);
+    for (let index = 0; index < mask.length; index++) if (!mask[index]) pixels.data.fill(0, index * 4, index * 4 + 4);
     context.putImageData(pixels, 0, 0);
     return canvas;
 }
@@ -278,16 +336,18 @@ document.addEventListener("alpine:init", () => {
         const quantizedPalettes = new Map();
         const paletteOrders = new Map();
         const paletteSources = new Map();
+        const paletteSourceEdits = new Set();
         const editedViews = new Set();
 
         return {
             tool: "pencil",
-            brushSize: 1,
+            pencilSize: 1,
+            eraserSize: 1,
             quantization: 64,
             quantizationMax: 64,
             quantizationPending: false,
             wandTolerance: 32,
-            color: "#202426",
+            color: "#000000",
             palette: [],
             importedPalettes: [],
             activePaletteId: "default",
@@ -303,7 +363,10 @@ document.addEventListener("alpine:init", () => {
             groups: [],
             activeLayerId: null,
             activeGroupId: null,
+            selectedLayerIds: [],
+            layerSelectionAnchorId: null,
             draggedLayerId: null,
+            draggedLayerIds: [],
             draggedLayerWasGrouped: false,
             draggedLayerOriginalGroupId: null,
             draggedGroupId: null,
@@ -315,6 +378,8 @@ document.addEventListener("alpine:init", () => {
             dropActive: false,
             selection: null,
             selectionPath: "",
+            canvasMenu: null,
+            layerMenu: null,
             centerGuideX: false,
             centerGuideY: false,
             hoverPoint: null,
@@ -429,7 +494,7 @@ document.addEventListener("alpine:init", () => {
                 }
                 voxelHighlightMesh = new THREE.InstancedMesh(
                     new THREE.BoxGeometry(1.02, 1.02, 1.06),
-                    new THREE.MeshBasicMaterial({ color: 0xffffff, transparent: true, opacity: 0, depthWrite: false }),
+                    new THREE.MeshBasicMaterial({ color: 0xff00ff, transparent: true, opacity: 0, depthWrite: false }),
                     CANVAS_SIZE * CANVAS_SIZE,
                 );
                 voxelHighlightMesh.count = 0;
@@ -499,7 +564,7 @@ document.addEventListener("alpine:init", () => {
                     canvas.width = Math.max(1, Math.round(size.width * 2));
                     canvas.height = Math.max(1, Math.round(size.height * 2));
                     this.updateSharedRendererSize();
-                    this.$refs.previewCanvas.closest(".preview-column").style.maxWidth = `${size.height}px`;
+                    for (const element of this.$refs.previewCanvas.closest(".workspace-content").querySelectorAll(".preview-presets, .future-window")) element.style.maxWidth = `${size.height}px`;
                     const aspect = size.width / size.height;
                     voxelCamera.left = -viewSize * aspect / 2;
                     voxelCamera.right = viewSize * aspect / 2;
@@ -873,8 +938,8 @@ document.addEventListener("alpine:init", () => {
                 const mode = previewDrag.mode;
                 if (previewDrag.canvas.hasPointerCapture(event.pointerId)) previewDrag.canvas.releasePointerCapture(event.pointerId);
                 previewDrag = null;
-                if (mode === "rotate") this.setPreviewView(this.previewPreset);
-                else this.setPreviewInteraction(false);
+                if (mode === "rotate") this.previewPreset = null;
+                this.setPreviewInteraction(false);
             },
 
             resetPreviewPosition() {
@@ -911,8 +976,11 @@ document.addEventListener("alpine:init", () => {
                 const rotations = {
                     perspective: [Math.PI / 6, -Math.PI / 4],
                     front: [0, 0],
+                    back: [0, Math.PI],
                     right: [0, -Math.PI / 2],
+                    left: [0, Math.PI / 2],
                     top: [Math.PI / 2, 0],
+                    bottom: [-Math.PI / 2, 0],
                 };
                 const preset = rotations[view] ? view : "perspective";
                 const [x, y] = rotations[preset];
@@ -946,11 +1014,13 @@ document.addEventListener("alpine:init", () => {
 
             markViewEdited(id = this.activeLayerId) {
                 if (this.activeOrientation === "front") {
-                    for (const orientation of ORIENTATIONS) paletteSources.delete(this.layerViewKey(id, orientation.id));
+                    if (this.activePaletteId === "default") for (const orientation of ORIENTATIONS) paletteSources.delete(this.layerViewKey(id, orientation.id));
+                    else paletteSourceEdits.add(this.layerViewKey(id, "front"));
                 } else {
                     const key = this.layerViewKey(id);
                     editedViews.add(key);
-                    paletteSources.delete(key);
+                    if (this.activePaletteId === "default") paletteSources.delete(key);
+                    else paletteSourceEdits.add(key);
                 }
             },
 
@@ -1352,7 +1422,10 @@ document.addEventListener("alpine:init", () => {
                 for (let offset = 0; offset < pixels.length; offset += 4) {
                     const pixelColor = this.canonicalPixelColor(pixels, offset);
                     if (!visible[offset / 4] || !pixels[offset + 3] || pixelColor !== color) continue;
-                    highlight.data[offset] = highlight.data[offset + 1] = highlight.data[offset + 2] = highlight.data[offset + 3] = 255;
+                    highlight.data[offset] = 255;
+                    highlight.data[offset + 1] = 0;
+                    highlight.data[offset + 2] = 255;
+                    highlight.data[offset + 3] = 255;
                 }
                 if (this.pulseVoxelHighlight(highlight.data)) return;
                 clearTimeout(paletteHighlightTimer);
@@ -1363,13 +1436,36 @@ document.addEventListener("alpine:init", () => {
                 paletteHighlightTimer = setTimeout(() => canvas.classList.remove("pulse"), 1000);
             },
 
+            togglePaletteColorSelection(color, additive = false) {
+                const source = this.canvasFor();
+                if (!source) return;
+                const pixels = source.getContext("2d").getImageData(LAYER_PADDING, LAYER_PADDING, CANVAS_SIZE, CANVAS_SIZE).data;
+                const visible = this.perspectiveMask();
+                const matches = [];
+                for (let index = 0; index < CANVAS_SIZE * CANVAS_SIZE; index++) {
+                    const offset = index * 4;
+                    if (!visible[index] || !pixels[offset + 3] || this.canonicalPixelColor(pixels, offset) !== color) continue;
+                    matches.push(maskIndex(index % CANVAS_SIZE, Math.floor(index / CANVAS_SIZE)));
+                }
+                if (!matches.length) return;
+                const target = new Uint8Array(LAYER_SIZE * LAYER_SIZE);
+                for (const index of matches) target[index] = 1;
+                const exact = selectionMask && matches.every((index) => selectionMask[index]) && selectionMask.every((selected, index) => !selected || target[index]);
+                if (!additive) return this.setSelectionMask(exact ? new Uint8Array(LAYER_SIZE * LAYER_SIZE) : target);
+                const remove = matches.every((index) => selectionMask?.[index]);
+                const mask = selectionMask ? new Uint8Array(selectionMask) : target;
+                for (const index of matches) mask[index] = remove ? 0 : 1;
+                this.setSelectionMask(mask);
+            },
+
             pulseVoxelHighlight(mask) {
                 if (!voxelHighlightMesh) return false;
                 const matrix = new THREE.Matrix4();
                 const depth = this.voxelLayerDepth() + 0.03;
                 let count = 0;
                 for (let index = 0; index < CANVAS_SIZE * CANVAS_SIZE; index++) {
-                    if (!mask[index * 4 + 3]) continue;
+                    const offset = index * 4;
+                    if (!mask[offset + 3]) continue;
                     matrix.makeTranslation(index % CANVAS_SIZE - 31.5, 31.5 - Math.floor(index / CANVAS_SIZE), depth);
                     voxelHighlightMesh.setMatrixAt(count++, matrix);
                 }
@@ -1379,7 +1475,7 @@ document.addEventListener("alpine:init", () => {
                 const started = performance.now();
                 const pulse = (time) => {
                     const progress = Math.min(1, (time - started) / 1000);
-                    voxelHighlightMesh.material.opacity = Math.sin(progress * Math.PI) * 0.9;
+                    voxelHighlightMesh.material.opacity = Math.sin(progress * Math.PI) * 0.85;
                     this.renderVoxelScene();
                     if (progress < 1) voxelHighlightFrame = requestAnimationFrame(pulse);
                     else {
@@ -1424,7 +1520,30 @@ document.addEventListener("alpine:init", () => {
                 return this.palette;
             },
 
+            syncPaletteSourceEdits() {
+                const palette = this.importedPalettes.find((entry) => entry.id === this.activePaletteId)?.colors;
+                if (!palette) return;
+                const colors = palette.map(hexColor);
+                for (const key of paletteSourceEdits) {
+                    const source = paletteSources.get(key);
+                    const canvas = canvases.get(key);
+                    if (!source || !canvas) continue;
+                    const current = canvas.getContext("2d", CANVAS_CONTEXT_OPTIONS).getImageData(0, 0, LAYER_SIZE, LAYER_SIZE).data;
+                    for (let offset = 0; offset < current.length; offset += 4) {
+                        let projected = [0, 0, 0, 0];
+                        if (source.data[offset + 3]) projected = colors.reduce((best, candidate) => {
+                            const distance = (source.data[offset] - candidate[0]) ** 2 + (source.data[offset + 1] - candidate[1]) ** 2 + (source.data[offset + 2] - candidate[2]) ** 2;
+                            return distance < best.distance ? { color: candidate, distance } : best;
+                        }, { color: colors[0], distance: Infinity }).color;
+                        if (current[offset] === projected[0] && current[offset + 1] === projected[1] && current[offset + 2] === projected[2] && current[offset + 3] === projected[3]) continue;
+                        for (let channel = 0; channel < 4; channel++) source.data[offset + channel] = current[offset + channel];
+                    }
+                }
+                paletteSourceEdits.clear();
+            },
+
             selectPalette(id) {
+                this.syncPaletteSourceEdits();
                 this.activePaletteId = id;
                 const entry = this.importedPalettes.find((candidate) => candidate.id === id);
                 if (!entry) {
@@ -1603,6 +1722,8 @@ document.addEventListener("alpine:init", () => {
                 this.groups.unshift(group);
                 this.activeGroupId = group.id;
                 this.activeLayerId = null;
+                this.selectedLayerIds = [];
+                this.layerSelectionAnchorId = null;
                 this.render();
                 this.refreshUI();
             },
@@ -1611,6 +1732,8 @@ document.addEventListener("alpine:init", () => {
                 this.confirmQuantization();
                 this.activeGroupId = id;
                 this.activeLayerId = null;
+                this.selectedLayerIds = [];
+                this.layerSelectionAnchorId = null;
                 this.render();
             },
 
@@ -1690,6 +1813,8 @@ document.addEventListener("alpine:init", () => {
                 else this.layers.unshift(layer);
                 this.activeLayerId = layer.id;
                 this.activeGroupId = null;
+                this.selectedLayerIds = [layer.id];
+                this.layerSelectionAnchorId = layer.id;
                 this.render();
                 this.refreshUI();
                 return layer;
@@ -1725,28 +1850,34 @@ document.addEventListener("alpine:init", () => {
                 this.normalizeLayerOffsets();
                 this.activeLayerId = copy.id;
                 this.activeGroupId = null;
+                this.selectedLayerIds = [copy.id];
+                this.layerSelectionAnchorId = copy.id;
                 this.render();
                 this.refreshUI();
             },
 
             removeLayer() {
-                if (!this.activeLayerId || this.layers.length <= 1) return;
+                if (!this.activeLayerId) return;
                 this.pushHistory();
-                const index = this.layers.findIndex((layer) => layer.id === this.activeLayerId);
-                const groupId = this.layers[index].groupId;
-                for (const orientation of ORIENTATIONS) {
-                    const key = viewKey(orientation.id, this.activeLayerId);
+                const ids = new Set(this.selectedLayerIds.includes(this.activeLayerId) ? this.selectedLayerIds : [this.activeLayerId]);
+                const removed = this.layers.map((layer, index) => ({ layer, index })).filter(({ layer }) => ids.has(layer.id));
+                const index = Math.min(...removed.map((entry) => entry.index));
+                for (const { layer } of removed) for (const orientation of ORIENTATIONS) {
+                    const key = viewKey(orientation.id, layer.id);
                     canvases.delete(key);
                     quantizedPalettes.delete(key);
                     paletteOrders.delete(key);
                     paletteSources.delete(key);
                     editedViews.delete(key);
                 }
-                this.layers.splice(index, 1);
-                this.positionEmptyGroup(groupId, index);
+                this.layers = this.layers.filter((layer) => !ids.has(layer.id));
+                for (const { layer, index: removedIndex } of removed) this.positionEmptyGroup(layer.groupId, removedIndex);
                 this.normalizeLayerOffsets();
-                this.activeLayerId = this.layers[Math.min(index, this.layers.length - 1)].id;
+                this.activeLayerId = this.layers[Math.min(index, this.layers.length - 1)]?.id ?? null;
                 this.activeGroupId = null;
+                this.selectedLayerIds = this.activeLayerId ? [this.activeLayerId] : [];
+                this.layerSelectionAnchorId = this.activeLayerId;
+                if (!this.activeLayerId) this.clearSelection();
                 this.render();
             },
 
@@ -1762,6 +1893,8 @@ document.addEventListener("alpine:init", () => {
                 this.groups.splice(index, 1);
                 this.activeGroupId = null;
                 this.activeLayerId = this.layers[0]?.id ?? null;
+                this.selectedLayerIds = this.activeLayerId ? [this.activeLayerId] : [];
+                this.layerSelectionAnchorId = this.activeLayerId;
                 this.render();
                 this.refreshUI();
             },
@@ -1797,6 +1930,31 @@ document.addEventListener("alpine:init", () => {
                 }
             },
 
+            shiftEditedLayerViews(id, deltaZ) {
+                if (!deltaZ) return;
+                const shifts = {
+                    right: [-deltaZ, 0],
+                    left: [deltaZ, 0],
+                    top: [0, deltaZ],
+                    bottom: [0, -deltaZ],
+                };
+                for (const [orientation, [dx, dy]] of Object.entries(shifts)) {
+                    const key = viewKey(orientation, id);
+                    if (!editedViews.has(key)) continue;
+                    const context = this.canvasFor(id, orientation).getContext("2d", CANVAS_CONTEXT_OPTIONS);
+                    const image = context.getImageData(0, 0, LAYER_SIZE, LAYER_SIZE);
+                    context.clearRect(0, 0, LAYER_SIZE, LAYER_SIZE);
+                    context.putImageData(image, dx, dy);
+                    const source = paletteSources.get(key);
+                    if (source) {
+                        const shifted = createLayerCanvas().getContext("2d", CANVAS_CONTEXT_OPTIONS);
+                        shifted.putImageData(source, dx, dy);
+                        paletteSources.set(key, shifted.getImageData(0, 0, LAYER_SIZE, LAYER_SIZE));
+                    }
+                    if (selectionMask && this.activeLayerId === id && this.activeOrientation === orientation) this.setSelectionMask(translateMask(selectionMask, dx, dy));
+                }
+            },
+
             setLayerOffset(layer, input) {
                 if (input.value === "") return;
                 const depth = layerDepth(layer);
@@ -1806,14 +1964,20 @@ document.addEventListener("alpine:init", () => {
                 if (offset === limits.max) this.flashPreviewWall("back");
                 else if (offset === limits.min) this.flashPreviewWall("front");
                 if (layerOffset(layer) === offset) return;
+                this.syncPaletteSourceEdits();
+                const previousRange = layerDepthRanges(this.layers).get(layer.id);
                 this.recordLayerValueEdit(layer, "offset");
                 layer.offset = offset;
+                const nextRange = layerDepthRanges(this.layers).get(layer.id);
+                this.shiftEditedLayerViews(layer.id, nextRange.start - previousRange.start);
                 this.render();
             },
 
             beginLayerValueEdit(layer, field) {
                 this.activeLayerId = layer.id;
                 this.activeGroupId = null;
+                this.selectedLayerIds = [layer.id];
+                this.layerSelectionAnchorId = layer.id;
                 this.editingLayerId = layer.id;
                 if (layerValueEdit?.id !== layer.id || layerValueEdit.field !== field) layerValueEdit = { id: layer.id, field, recorded: false };
             },
@@ -1854,9 +2018,17 @@ document.addEventListener("alpine:init", () => {
                     event.preventDefault();
                     return;
                 }
+                if (!this.isLayerSelected(id)) {
+                    this.selectedLayerIds = [id];
+                    this.layerSelectionAnchorId = id;
+                }
+                this.activeLayerId = id;
+                this.activeGroupId = null;
+                const selected = new Set(this.selectedLayerIds);
+                this.draggedLayerIds = this.layers.filter((layer) => selected.has(layer.id)).map((layer) => layer.id);
                 this.draggedLayerId = id;
                 this.draggedLayerOriginalGroupId = this.layers.find((layer) => layer.id === id)?.groupId ?? null;
-                this.draggedLayerWasGrouped = !!this.draggedLayerOriginalGroupId;
+                this.draggedLayerWasGrouped = this.layers.some((layer) => selected.has(layer.id) && layer.groupId);
                 this.draggedGroupId = null;
                 this.layerDragChanged = false;
                 event.dataTransfer.effectAllowed = "move";
@@ -1870,6 +2042,7 @@ document.addEventListener("alpine:init", () => {
                     return;
                 }
                 this.draggedLayerId = null;
+                this.draggedLayerIds = [];
                 this.draggedLayerWasGrouped = false;
                 this.draggedLayerOriginalGroupId = null;
                 this.draggedGroupId = id;
@@ -1894,7 +2067,7 @@ document.addEventListener("alpine:init", () => {
                     return;
                 }
                 const target = this.layers.find((layer) => layer.id === targetId);
-                if (this.draggedLayerId === targetId) {
+                if (this.draggedLayerIds.includes(targetId)) {
                     this.setLayerInterior(event);
                     return;
                 }
@@ -1964,6 +2137,10 @@ document.addEventListener("alpine:init", () => {
                 const position = this.layerDropPosition;
                 if (!targetType || !position) return false;
                 if (this.draggedLayerId) {
+                    if (this.draggedLayerIds.length > 1) {
+                        if (targetType === "layer" && this.draggedLayerIds.includes(targetId)) return false;
+                        return targetType !== "root" || this.draggedLayerWasGrouped || targetId === "top" || targetId === "bottom";
+                    }
                     const layer = this.layers.find((candidate) => candidate.id === this.draggedLayerId);
                     if (!layer) return false;
                     if (targetType === "root") {
@@ -2088,7 +2265,63 @@ document.addEventListener("alpine:init", () => {
                 });
             },
 
+            moveDraggedLayers(targetType, targetId, position, finish = true) {
+                const ids = new Set(this.draggedLayerIds);
+                const moving = this.layers.filter((layer) => ids.has(layer.id));
+                const targetLayer = targetType === "layer" ? this.layers.find((layer) => layer.id === targetId) : null;
+                const targetGroup = targetType === "group" ? this.groups.find((group) => group.id === targetId) : null;
+                if (moving.length < 2 || (targetType === "layer" && (!targetLayer || ids.has(targetId))) || (targetType === "group" && !targetGroup)) {
+                    if (finish) this.finishLayerDrag();
+                    return;
+                }
+                this.recordLayerDrag();
+                const positions = this.captureLayerPositions();
+                const removed = moving.map((layer) => ({ layer, index: this.layers.indexOf(layer), groupId: layer.groupId }));
+                const emptyAnchors = this.emptyGroupAnchors(targetType === "group" ? targetId : null);
+                const adjustedPosition = (value) => value - removed.filter(({ index }) => index < value).length;
+                this.layers = this.layers.filter((layer) => !ids.has(layer.id));
+                let insertionIndex = 0;
+                let groupId = null;
+                if (targetType === "root") insertionIndex = targetId === "top" ? 0 : this.layers.length;
+                else if (targetType === "layer") {
+                    groupId = targetLayer.groupId ?? null;
+                    insertionIndex = this.layers.indexOf(targetLayer) + (position?.startsWith("after") ? 1 : 0);
+                } else {
+                    const memberIndexes = this.layers.map((layer, index) => layer.groupId === targetId ? index : -1).filter((index) => index >= 0);
+                    const emptyPosition = adjustedPosition(Math.max(0, Math.min(this.layers.length + moving.length, targetGroup.position ?? 0)));
+                    if (position === "inside") {
+                        groupId = targetId;
+                        insertionIndex = memberIndexes.length ? memberIndexes.at(-1) + 1 : emptyPosition;
+                        targetGroup.collapsed = false;
+                    } else {
+                        insertionIndex = memberIndexes.length
+                            ? position === "before" ? memberIndexes[0] : memberIndexes.at(-1) + 1
+                            : emptyPosition;
+                        if (!memberIndexes.length) targetGroup.position = insertionIndex + (position === "before" ? moving.length : 0);
+                    }
+                }
+                for (const layer of moving) layer.groupId = groupId;
+                this.layers.splice(insertionIndex, 0, ...moving);
+                for (const anchor of emptyAnchors) {
+                    let anchorPosition = adjustedPosition(anchor.position);
+                    if (anchorPosition > insertionIndex || (anchorPosition === insertionIndex && position !== "after" && targetId !== "bottom")) anchorPosition += moving.length;
+                    anchor.group.position = Math.max(0, Math.min(this.layers.length, anchorPosition));
+                }
+                for (const { groupId: previousGroupId, index } of removed) if (previousGroupId !== groupId) this.positionEmptyGroup(previousGroupId, Math.min(index, this.layers.length));
+                this.activeLayerId = this.draggedLayerId;
+                this.activeGroupId = null;
+                this.normalizeLayerOffsets();
+                this.render();
+                this.refreshUI();
+                this.animateLayerPositions(positions);
+                if (finish) this.finishLayerDrag();
+            },
+
             dropOnLayer(targetId, finish = true) {
+                if (this.draggedLayerIds.length > 1) {
+                    this.moveDraggedLayers("layer", targetId, this.layerDropPosition, finish);
+                    return;
+                }
                 const target = this.layers.find((layer) => layer.id === targetId);
                 if (!target) {
                     if (finish) this.finishLayerDrag();
@@ -2133,6 +2366,10 @@ document.addEventListener("alpine:init", () => {
             },
 
             dropOnGroup(targetId, finish = true) {
+                if (this.draggedLayerIds.length > 1) {
+                    this.moveDraggedLayers("group", targetId, this.layerDropPosition, finish);
+                    return;
+                }
                 if (this.draggedGroupId) {
                     this.moveDraggedGroup("group", targetId, this.layerDropPosition);
                     if (finish) this.finishLayerDrag();
@@ -2253,6 +2490,8 @@ document.addEventListener("alpine:init", () => {
                 else this.groups.find((group) => group.id === groupId).position = index;
                 this.activeGroupId = groupId;
                 this.activeLayerId = null;
+                this.selectedLayerIds = [];
+                this.layerSelectionAnchorId = null;
                 this.normalizeLayerOffsets();
                 this.render();
                 this.refreshUI();
@@ -2260,6 +2499,10 @@ document.addEventListener("alpine:init", () => {
             },
 
             moveDraggedLayerToRoot(position, finish = true) {
+                if (this.draggedLayerIds.length > 1) {
+                    this.moveDraggedLayers("root", position, "outside", finish);
+                    return;
+                }
                 const layer = this.layers.find((candidate) => candidate.id === this.draggedLayerId);
                 if (!layer) {
                     if (finish) this.finishLayerDrag();
@@ -2282,6 +2525,8 @@ document.addEventListener("alpine:init", () => {
                 this.positionEmptyGroup(previousGroupId, currentIndex + (insertionIndex < currentIndex ? 1 : 0));
                 this.activeGroupId = null;
                 this.activeLayerId = layer.id;
+                if (!this.isLayerSelected(layer.id)) this.selectedLayerIds = [layer.id];
+                this.layerSelectionAnchorId = layer.id;
                 this.normalizeLayerOffsets();
                 this.render();
                 this.refreshUI();
@@ -2291,6 +2536,7 @@ document.addEventListener("alpine:init", () => {
 
             finishLayerDrag() {
                 this.draggedLayerId = null;
+                this.draggedLayerIds = [];
                 this.draggedLayerWasGrouped = false;
                 this.draggedLayerOriginalGroupId = null;
                 this.draggedGroupId = null;
@@ -2378,6 +2624,60 @@ document.addEventListener("alpine:init", () => {
                 this.centerGuideY = false;
             },
 
+            openCanvasMenu(event) {
+                event.preventDefault();
+                this.layerMenu = null;
+                this.canvasMenu = {
+                    x: Math.max(8, Math.min(event.clientX, window.innerWidth - 188)),
+                    y: Math.max(8, Math.min(event.clientY, window.innerHeight - 80)),
+                };
+            },
+
+            closeContextMenus(event) {
+                if (this.canvasMenu && !event.target.closest(".canvas-context-menu")) this.canvasMenu = null;
+                if (this.layerMenu && !event.target.closest(".layer-context-menu")) this.layerMenu = null;
+            },
+
+            flipSelection(axis) {
+                if (!selectionMask || !this.selection || !this.canvasFor()) return;
+                const horizontal = axis === "horizontal";
+                const vertical = axis === "vertical";
+                if (!horizontal && !vertical) return;
+                this.pushHistory();
+                this.markViewEdited();
+                const bounds = { ...this.selection };
+                const mask = new Uint8Array(selectionMask);
+                const flippedMask = new Uint8Array(mask);
+                for (let index = 0; index < mask.length; index++) if (mask[index]) flippedMask[index] = 0;
+                for (let y = bounds.y; y < bounds.y + bounds.height; y++) for (let x = bounds.x; x < bounds.x + bounds.width; x++) if (mask[maskIndex(x, y)]) {
+                    const targetX = horizontal ? bounds.x + bounds.width - 1 - (x - bounds.x) : x;
+                    const targetY = vertical ? bounds.y + bounds.height - 1 - (y - bounds.y) : y;
+                    flippedMask[maskIndex(targetX, targetY)] = 1;
+                }
+                if (this.activeOrientation === "front") this.flipRelativeViews(mask, bounds, horizontal, vertical);
+                else {
+                    const context = this.activeContext();
+                    const pixels = selectionPixels(this.canvasFor(), mask, bounds);
+                    clearMaskedPixels(context, mask);
+                    clearMaskedPixels(context, flippedMask);
+                    context.save();
+                    context.translate(bounds.x + LAYER_PADDING + (horizontal ? bounds.width : 0), bounds.y + LAYER_PADDING + (vertical ? bounds.height : 0));
+                    context.scale(horizontal ? -1 : 1, vertical ? -1 : 1);
+                    context.drawImage(pixels, 0, 0);
+                    context.restore();
+                }
+                const context = this.activeContext();
+                const result = context.getImageData(0, 0, LAYER_SIZE, LAYER_SIZE).data;
+                for (let index = 0; index < flippedMask.length; index++) if (flippedMask[index] && !result[index * 4 + 3]) flippedMask[index] = 0;
+                this.setSelectionMask(flippedMask);
+                this.canvasMenu = null;
+                this.render();
+            },
+
+            activeBrushSize() {
+                return this.tool === "eraser" ? this.eraserSize : this.pencilSize;
+            },
+
             updateCenterGuides(point) {
                 this.centerGuideX = Math.abs(point.x - CANVAS_SIZE / 2) <= 1;
                 this.centerGuideY = Math.abs(point.y - CANVAS_SIZE / 2) <= 1;
@@ -2420,11 +2720,100 @@ document.addEventListener("alpine:init", () => {
                 ));
             },
 
-            activateLayer(id) {
+            isLayerSelected(id) {
+                return this.selectedLayerIds.includes(id);
+            },
+
+            openLayerMenu(id, event) {
+                if (this.activeGroupId || this.selectedLayerIds.length < 2 || !this.isLayerSelected(id)) return;
+                event.preventDefault();
+                event.stopPropagation();
+                this.canvasMenu = null;
+                this.layerMenu = {
+                    x: Math.max(8, Math.min(event.clientX, window.innerWidth - 188)),
+                    y: Math.max(8, Math.min(event.clientY, window.innerHeight - 48)),
+                };
+            },
+
+            mergeSelectedLayers() {
+                const ids = new Set(this.selectedLayerIds);
+                const selected = this.layers.filter((layer) => ids.has(layer.id));
+                if (selected.length < 2 || this.activeGroupId) return;
                 this.confirmQuantization();
-                this.activeLayerId = id;
+                this.syncPaletteSourceEdits();
+                this.syncDerivedOrientations();
+                this.pushHistory(false);
+                const target = selected[0];
+                const visible = selected.filter((layer) => layer.visible);
+                const composites = new Map();
+                for (const orientation of ORIENTATIONS) {
+                    const composite = createLayerCanvas();
+                    const context = composite.getContext("2d", CANVAS_CONTEXT_OPTIONS);
+                    for (const layer of [...visible].reverse()) context.drawImage(this.canvasFor(layer.id, orientation.id), 0, 0);
+                    composites.set(orientation.id, composite);
+                }
+                const removed = selected.slice(1).map((layer) => ({ layer, index: this.layers.indexOf(layer) }));
+                for (const layer of selected) for (const orientation of ORIENTATIONS) {
+                    const key = viewKey(orientation.id, layer.id);
+                    quantizedPalettes.delete(key);
+                    paletteOrders.delete(key);
+                    paletteSources.delete(key);
+                    paletteSourceEdits.delete(key);
+                    editedViews.delete(key);
+                    if (layer !== target) canvases.delete(key);
+                }
+                for (const orientation of ORIENTATIONS) {
+                    const key = viewKey(orientation.id, target.id);
+                    const context = this.canvasFor(target.id, orientation.id).getContext("2d", CANVAS_CONTEXT_OPTIONS);
+                    context.clearRect(0, 0, LAYER_SIZE, LAYER_SIZE);
+                    context.drawImage(composites.get(orientation.id), 0, 0);
+                    if (orientation.id !== "front") editedViews.add(key);
+                }
+                this.layers = this.layers.filter((layer) => !ids.has(layer.id) || layer === target);
+                target.visible = visible.length > 0;
+                for (const { layer, index } of removed) this.positionEmptyGroup(layer.groupId, Math.min(index, this.layers.length));
+                this.activeLayerId = target.id;
+                this.activeGroupId = null;
+                this.selectedLayerIds = [target.id];
+                this.layerSelectionAnchorId = target.id;
+                this.layerMenu = null;
+                this.clearSelection();
+                this.normalizeLayerOffsets();
+                this.render();
+                this.refreshUI();
+            },
+
+            selectLayer(id, event = {}) {
+                this.confirmQuantization();
+                const visible = this.layerEntries().filter((entry) => entry.type === "layer").map((entry) => entry.layer.id);
+                const additive = !!(event.ctrlKey || event.metaKey);
+                if (event.shiftKey) {
+                    const anchor = visible.includes(this.layerSelectionAnchorId) ? this.layerSelectionAnchorId : this.activeLayerId;
+                    const start = visible.indexOf(anchor);
+                    const end = visible.indexOf(id);
+                    const range = visible.slice(Math.min(start < 0 ? end : start, end), Math.max(start < 0 ? end : start, end) + 1);
+                    this.selectedLayerIds = additive ? [...new Set([...this.selectedLayerIds, ...range])] : range;
+                    this.activeLayerId = id;
+                } else if (additive) {
+                    if (this.isLayerSelected(id)) {
+                        this.selectedLayerIds = this.selectedLayerIds.filter((selectedId) => selectedId !== id);
+                        if (this.activeLayerId === id) this.activeLayerId = this.selectedLayerIds.at(-1) ?? null;
+                    } else {
+                        this.selectedLayerIds = [...this.selectedLayerIds, id];
+                        this.activeLayerId = id;
+                    }
+                    this.layerSelectionAnchorId = id;
+                } else {
+                    this.selectedLayerIds = [id];
+                    this.activeLayerId = id;
+                    this.layerSelectionAnchorId = id;
+                }
                 this.activeGroupId = null;
                 this.render();
+            },
+
+            activateLayer(id) {
+                this.selectLayer(id);
             },
 
             selectionStyle() {
@@ -2449,7 +2838,7 @@ document.addEventListener("alpine:init", () => {
             hoverStyle() {
                 if (!this.hoverPoint) return {};
                 const size = this.tool === "pencil" || this.tool === "eraser"
-                    ? Math.max(1, Math.min(16, Number(this.brushSize) || 1))
+                    ? Math.max(1, Math.min(16, Number(this.activeBrushSize()) || 1))
                     : 1;
                 return {
                     left: `${this.hoverPoint.x / CANVAS_SIZE * 100}%`,
@@ -2474,7 +2863,7 @@ document.addEventListener("alpine:init", () => {
                 if (this.hoverPoint) {
                     const depth = this.voxelLayerDepth();
                     const size = this.tool === "pencil" || this.tool === "eraser"
-                        ? Math.max(1, Math.min(16, Number(this.brushSize) || 1))
+                        ? Math.max(1, Math.min(16, Number(this.activeBrushSize()) || 1))
                         : 1;
                     const startX = Math.floor(this.hoverPoint.x) - Math.floor((size - 1) / 2);
                     const startY = Math.floor(this.hoverPoint.y) - Math.floor((size - 1) / 2);
@@ -2776,6 +3165,7 @@ document.addEventListener("alpine:init", () => {
                     clientX: event.clientX,
                     clientY: event.clientY,
                     moved: false,
+                    axisLock: null,
                 };
             },
 
@@ -2790,6 +3180,10 @@ document.addEventListener("alpine:init", () => {
                     const selection = selectionAnchor.selection;
                     let dx = Math.max(-LAYER_PADDING - selection.x, Math.min(CANVAS_SIZE + LAYER_PADDING - selection.x - selection.width, point.x - selectionAnchor.start.x));
                     let dy = Math.max(-LAYER_PADDING - selection.y, Math.min(CANVAS_SIZE + LAYER_PADDING - selection.y - selection.height, point.y - selectionAnchor.start.y));
+                    if (event.shiftKey) {
+                        selectionAnchor.axisLock ??= dx || dy ? Math.abs(dx) >= Math.abs(dy) ? "horizontal" : "vertical" : null;
+                        selectionAnchor.axisLock === "horizontal" ? dy = 0 : selectionAnchor.axisLock === "vertical" && (dx = 0);
+                    }
                     ({ dx, dy } = this.updateSelectionGuides(selection, dx, dy));
                     this.setSelectionMask(translateMask(selectionAnchor.mask, dx, dy));
                     return;
@@ -2813,6 +3207,7 @@ document.addEventListener("alpine:init", () => {
             },
 
             startMove(event) {
+                if (event.button !== 0) return;
                 if (this.pointerId !== null) return;
                 if (!this.canvasFor()) return;
                 if (!this.selection) this.selectLayerPixels();
@@ -2824,6 +3219,7 @@ document.addEventListener("alpine:init", () => {
                 const selection = { ...this.selection };
                 const mask = new Uint8Array(selectionMask);
                 const pixels = selectionPixels(this.canvasFor(), mask, selection);
+                const relativeMasks = this.activeOrientation === "front" ? this.relativeSelectionMasks(mask) : null;
                 this.pointerId = event.pointerId;
                 moveState = {
                     start: point,
@@ -2831,9 +3227,16 @@ document.addEventListener("alpine:init", () => {
                     mask,
                     pixels,
                     base: this.activeContext().getImageData(0, 0, LAYER_SIZE, LAYER_SIZE),
+                    relativeViews: relativeMasks && ORIENTATIONS.map((orientation) => ({
+                        orientation: orientation.id,
+                        mask: relativeMasks[orientation.id],
+                        pixels: maskedLayerPixels(this.canvasFor(this.activeLayerId, orientation.id), relativeMasks[orientation.id]),
+                        base: this.canvasFor(this.activeLayerId, orientation.id).getContext("2d").getImageData(0, 0, LAYER_SIZE, LAYER_SIZE),
+                    })),
                     dx: 0,
                     dy: 0,
                     recorded: false,
+                    axisLock: null,
                 };
             },
 
@@ -2843,19 +3246,32 @@ document.addEventListener("alpine:init", () => {
                 const selection = moveState.selection;
                 let dx = Math.max(-LAYER_PADDING - selection.x, Math.min(CANVAS_SIZE + LAYER_PADDING - selection.x - selection.width, point.x - moveState.start.x));
                 let dy = Math.max(-LAYER_PADDING - selection.y, Math.min(CANVAS_SIZE + LAYER_PADDING - selection.y - selection.height, point.y - moveState.start.y));
+                if (event.shiftKey) {
+                    moveState.axisLock ??= dx || dy ? Math.abs(dx) >= Math.abs(dy) ? "horizontal" : "vertical" : null;
+                    moveState.axisLock === "horizontal" ? dy = 0 : moveState.axisLock === "vertical" && (dx = 0);
+                }
                 ({ dx, dy } = this.updateSelectionGuides(selection, dx, dy));
                 if (dx === moveState.dx && dy === moveState.dy) return;
                 if (!moveState.recorded) {
                     this.pushHistory();
                     this.markViewEdited();
+                    if (moveState.relativeViews) for (const orientation of ORIENTATIONS.slice(1)) editedViews.add(this.layerViewKey(this.activeLayerId, orientation.id));
                     moveState.recorded = true;
                 }
                 moveState.dx = dx;
                 moveState.dy = dy;
-                const context = this.activeContext();
-                context.putImageData(moveState.base, 0, 0);
-                clearMaskedPixels(context, moveState.mask);
-                context.drawImage(moveState.pixels, selection.x + dx + LAYER_PADDING, selection.y + dy + LAYER_PADDING);
+                if (moveState.relativeViews) for (const view of moveState.relativeViews) {
+                    const context = this.canvasFor(this.activeLayerId, view.orientation).getContext("2d");
+                    const [moveX, moveY] = this.relativeTranslation(view.orientation, dx, dy);
+                    context.putImageData(view.base, 0, 0);
+                    clearMaskedPixels(context, view.mask);
+                    context.drawImage(view.pixels, moveX, moveY);
+                } else {
+                    const context = this.activeContext();
+                    context.putImageData(moveState.base, 0, 0);
+                    clearMaskedPixels(context, moveState.mask);
+                    context.drawImage(moveState.pixels, selection.x + dx + LAYER_PADDING, selection.y + dy + LAYER_PADDING);
+                }
                 this.setSelectionMask(translateMask(moveState.mask, dx, dy));
                 this.queueRender();
             },
@@ -2873,7 +3289,7 @@ document.addEventListener("alpine:init", () => {
 
             paint(x, y) {
                 const context = this.activeContext();
-                const size = Math.max(1, Math.min(16, Number(this.brushSize) || 1));
+                const size = Math.max(1, Math.min(16, Number(this.activeBrushSize()) || 1));
                 const startX = x - Math.floor((size - 1) / 2);
                 const startY = y - Math.floor((size - 1) / 2);
                 context.fillStyle = this.color;
@@ -2975,6 +3391,8 @@ document.addEventListener("alpine:init", () => {
                     groups: this.groups.map((group) => ({ ...group })),
                     activeLayerId: this.activeLayerId,
                     activeGroupId: this.activeGroupId,
+                    selectedLayerIds: [...this.selectedLayerIds],
+                    layerSelectionAnchorId: this.layerSelectionAnchorId,
                     editedViews: [...editedViews],
                     selectionMask: selectionMask ? new Uint8Array(selectionMask) : null,
                     pixels: ORIENTATIONS.flatMap((orientation) => this.layers.map(({ id }) => ({
@@ -2998,6 +3416,9 @@ document.addEventListener("alpine:init", () => {
                 this.normalizeLayerOffsets();
                 this.activeLayerId = snapshot.activeLayerId;
                 this.activeGroupId = this.groups.some((group) => group.id === snapshot.activeGroupId) ? snapshot.activeGroupId : null;
+                const layerIds = new Set(this.layers.map((layer) => layer.id));
+                this.selectedLayerIds = (snapshot.selectedLayerIds ?? [this.activeLayerId]).filter((id) => layerIds.has(id));
+                this.layerSelectionAnchorId = layerIds.has(snapshot.layerSelectionAnchorId) ? snapshot.layerSelectionAnchorId : this.activeLayerId;
                 editedViews.clear();
                 for (const key of snapshot.editedViews ?? []) editedViews.add(key);
                 if (snapshot.selectionMask) this.setSelectionMask(new Uint8Array(snapshot.selectionMask));
@@ -3030,6 +3451,131 @@ document.addEventListener("alpine:init", () => {
                 this.restore(this.future.pop());
             },
 
+            async saveProject() {
+                this.confirmQuantization();
+                this.syncPaletteSourceEdits();
+                this.syncDerivedOrientations();
+                const textureImages = ORIENTATIONS.flatMap((orientation) => this.layers.map(({ id }) => ({
+                    key: viewKey(orientation.id, id),
+                    image: this.canvasFor(id, orientation.id).getContext("2d", CANVAS_CONTEXT_OPTIONS).getImageData(0, 0, LAYER_SIZE, LAYER_SIZE),
+                })));
+                const sourceImages = [...paletteSources].map(([key, image]) => ({ key, image }));
+                const project = {
+                    format: "grindland-model",
+                    version: 2,
+                    layers: this.layers.map(({ id, name, visible, depth, offset, groupId }) => ({ id, name, visible, depth, offset, groupId })),
+                    groups: this.groups.map((group) => ({ ...group })),
+                    assets: [],
+                    textures: [],
+                    paletteSources: [],
+                    quantizedPalettes: [...quantizedPalettes].map(([key, value]) => ({ key, palette: [...value.palette], confirmed: !!value.confirmed, locked: !!value.locked })),
+                    paletteOrders: [...paletteOrders].map(([key, palette]) => ({ key, palette: [...palette] })),
+                    importedPalettes: this.importedPalettes.map((entry) => ({ ...entry, colors: [...entry.colors] })),
+                    editedViews: [...editedViews],
+                    selectionMask: selectionMask ? [...selectionMask] : null,
+                    activeLayerId: this.activeLayerId,
+                    activeGroupId: this.activeGroupId,
+                    selectedLayerIds: [...this.selectedLayerIds],
+                    layerSelectionAnchorId: this.layerSelectionAnchorId,
+                    activeOrientation: "front",
+                    activePaletteId: this.activePaletteId,
+                    color: this.color,
+                    pencilSize: this.pencilSize,
+                    eraserSize: this.eraserSize,
+                    gridVisible: this.gridVisible,
+                    verticalSymmetry: this.verticalSymmetry,
+                    horizontalSymmetry: this.horizontalSymmetry,
+                    counters: { layer: nextLayerId, group: nextGroupId, palette: nextPaletteId },
+                };
+                const assets = new Map();
+                const addAsset = async (image) => {
+                    const fingerprint = encodeImageData(image);
+                    if (assets.has(fingerprint)) return assets.get(fingerprint);
+                    const id = project.assets.length.toString(36);
+                    project.assets.push({ id, data: await encodeLosslessTexture(image) });
+                    assets.set(fingerprint, id);
+                    return id;
+                };
+                for (const { key, image } of textureImages) project.textures.push({ key, asset: await addAsset(image) });
+                for (const { key, image } of sourceImages) project.paletteSources.push({ key, asset: await addAsset(image) });
+                const url = URL.createObjectURL(new Blob([JSON.stringify(project)], { type: "application/json" }));
+                const link = document.createElement("a");
+                link.download = "model.grindland";
+                link.href = url;
+                link.click();
+                setTimeout(() => URL.revokeObjectURL(url), 0);
+            },
+
+            async loadProject(file) {
+                if (!file) return;
+                try {
+                    const project = JSON.parse(await file.text());
+                    if (project.format !== "grindland-model" || ![1, 2].includes(project.version) || !Array.isArray(project.layers) || !Array.isArray(project.textures)) return;
+                    const layerIds = new Set(project.layers.map((layer) => layer.id));
+                    const assets = project.version === 2
+                        ? new Map(await Promise.all((project.assets ?? []).map(async (entry) => [entry.id, await decodeTexture(entry.data)])))
+                        : null;
+                    const savedImage = (entry) => project.version === 2 ? assets.get(entry.asset) : decodeImageData(entry.data);
+                    const textures = new Map(project.textures.map((entry) => [entry.key, savedImage(entry)]));
+                    canvases.clear();
+                    paletteSources.clear();
+                    paletteSourceEdits.clear();
+                    quantizedPalettes.clear();
+                    paletteOrders.clear();
+                    editedViews.clear();
+                    for (const layer of project.layers) for (const orientation of ORIENTATIONS) {
+                        const key = viewKey(orientation.id, layer.id);
+                        const canvas = createLayerCanvas();
+                        const image = textures.get(key);
+                        if (image) canvas.getContext("2d", CANVAS_CONTEXT_OPTIONS).putImageData(image, 0, 0);
+                        canvases.set(key, canvas);
+                    }
+                    this.layers = project.layers.map((layer) => ({ ...layer, depth: layerDepth(layer), offset: layerOffset(layer), groupId: layer.groupId ?? null }));
+                    this.groups = Array.isArray(project.groups) ? project.groups.map((group) => ({ ...group })) : [];
+                    for (const entry of project.paletteSources ?? []) if (canvases.has(entry.key)) paletteSources.set(entry.key, savedImage(entry));
+                    for (const entry of project.quantizedPalettes ?? []) if (canvases.has(entry.key) && Array.isArray(entry.palette) && entry.palette.length) {
+                        const palette = [...entry.palette];
+                        quantizedPalettes.set(entry.key, { palette, colors: palette.map(hexColor), allowed: new Set(palette), confirmed: entry.confirmed, locked: entry.locked });
+                    }
+                    for (const entry of project.paletteOrders ?? []) if (canvases.has(entry.key) && Array.isArray(entry.palette)) paletteOrders.set(entry.key, [...entry.palette]);
+                    for (const key of project.editedViews ?? []) if (canvases.has(key)) editedViews.add(key);
+                    this.importedPalettes = Array.isArray(project.importedPalettes) ? project.importedPalettes.map((entry) => ({ ...entry, colors: [...entry.colors] })) : [];
+                    this.activeLayerId = layerIds.has(project.activeLayerId) ? project.activeLayerId : this.layers[0]?.id ?? null;
+                    this.activeGroupId = this.groups.some((group) => group.id === project.activeGroupId) ? project.activeGroupId : null;
+                    this.selectedLayerIds = (project.selectedLayerIds ?? [this.activeLayerId]).filter((id) => layerIds.has(id));
+                    this.layerSelectionAnchorId = layerIds.has(project.layerSelectionAnchorId) ? project.layerSelectionAnchorId : this.activeLayerId;
+                    this.activeOrientation = "front";
+                    const orientation = this.orientationRotation();
+                    if (voxelViewRoot) voxelViewRoot.rotation.set(-orientation.x, -orientation.y, 0);
+                    this.activePaletteId = project.activePaletteId === "default" || this.importedPalettes.some((entry) => entry.id === project.activePaletteId) ? project.activePaletteId : "default";
+                    this.color = /^#[0-9a-f]{6}$/i.test(project.color) ? project.color : "#000000";
+                    this.pencilSize = Math.max(1, Math.min(16, Number(project.pencilSize) || 1));
+                    this.eraserSize = Math.max(1, Math.min(16, Number(project.eraserSize) || 1));
+                    this.gridVisible = !!project.gridVisible;
+                    this.verticalSymmetry = !!project.verticalSymmetry;
+                    this.horizontalSymmetry = !!project.horizontalSymmetry;
+                    nextLayerId = Math.max(Number(project.counters?.layer) || 0, ...this.layers.map((layer) => Number(layer.id.match(/\d+$/)?.[0]) || 0));
+                    nextGroupId = Math.max(Number(project.counters?.group) || 0, ...this.groups.map((group) => Number(group.id.match(/\d+$/)?.[0]) || 0));
+                    nextPaletteId = Math.max(Number(project.counters?.palette) || 0, ...this.importedPalettes.map((entry) => Number(entry.id.match(/\d+$/)?.[0]) || 0));
+                    if (project.selectionMask?.length === LAYER_SIZE * LAYER_SIZE) this.setSelectionMask(new Uint8Array(project.selectionMask));
+                    else this.clearSelection();
+                    this.history = [];
+                    this.future = [];
+                    selectionAnchor = null;
+                    moveState = null;
+                    quantizationSource = null;
+                    this.quantizationPending = false;
+                    this.drawing = false;
+                    this.sampling = false;
+                    this.pointerId = null;
+                    this.normalizeLayerOffsets();
+                    this.render();
+                    this.refreshUI();
+                } catch (error) {
+                    console.error(error);
+                }
+            },
+
             clearCanvas() {
                 if (!this.canvasFor()) return;
                 this.pushHistory();
@@ -3047,8 +3593,14 @@ document.addEventListener("alpine:init", () => {
                 if (!dx && !dy) return;
                 this.pushHistory();
                 this.markViewEdited();
-                const source = this.canvasFor();
                 const mask = new Uint8Array(selectionMask);
+                if (this.activeOrientation === "front") {
+                    this.translateRelativeViews(mask, dx, dy);
+                    this.setSelectionMask(translateMask(mask, dx, dy));
+                    this.render();
+                    return;
+                }
+                const source = this.canvasFor();
                 const pixels = selectionPixels(source, mask, selection);
                 const context = this.activeContext();
                 clearMaskedPixels(context, mask);
@@ -3062,7 +3614,17 @@ document.addEventListener("alpine:init", () => {
                 const mask = new Uint8Array(selectionMask);
                 const bounds = { ...this.selection };
                 const pixels = selectionPixels(this.canvasFor(), mask, bounds);
-                internalClipboard = { pixels, mask, bounds, quantizedPalette: quantizedPalettes.get(this.layerViewKey()) };
+                const layer = this.layers.find((candidate) => candidate.id === this.activeLayerId);
+                const relativeMasks = this.relativeSelectionMasks(mask);
+                internalClipboard = {
+                    pixels,
+                    mask,
+                    bounds,
+                    depth: layerDepth(layer),
+                    offset: layerOffset(layer),
+                    views: Object.fromEntries(ORIENTATIONS.map((orientation) => [orientation.id, maskedLayerPixels(this.canvasFor(layer.id, orientation.id), relativeMasks[orientation.id])])),
+                    palettes: Object.fromEntries(ORIENTATIONS.map((orientation) => [orientation.id, quantizedPalettes.get(this.layerViewKey(layer.id, orientation.id))])),
+                };
                 if (navigator.clipboard?.write && window.ClipboardItem) {
                     pixels.toBlob((blob) => {
                         if (blob) navigator.clipboard.write([new ClipboardItem({ "image/png": blob })]).catch(() => {});
@@ -3075,25 +3637,129 @@ document.addEventListener("alpine:init", () => {
                 this.render();
             },
 
+            relativeSelectionMasks(mask) {
+                const masks = Object.fromEntries(ORIENTATIONS.map((orientation) => [orientation.id, new Uint8Array(LAYER_SIZE * LAYER_SIZE)]));
+                const front = this.canvasFor(this.activeLayerId, "front").getContext("2d").getImageData(LAYER_PADDING, LAYER_PADDING, CANVAS_SIZE, CANVAS_SIZE).data;
+                const range = layerDepthRanges(this.layers).get(this.activeLayerId);
+                const left = new Int16Array(CANVAS_SIZE).fill(-1);
+                const right = new Int16Array(CANVAS_SIZE).fill(-1);
+                const top = new Int16Array(CANVAS_SIZE).fill(-1);
+                const bottom = new Int16Array(CANVAS_SIZE).fill(-1);
+                for (let y = 0; y < CANVAS_SIZE; y++) for (let x = 0; x < CANVAS_SIZE; x++) if (front[(y * CANVAS_SIZE + x) * 4 + 3]) {
+                    if (left[y] < 0) left[y] = x;
+                    right[y] = x;
+                    if (top[x] < 0) top[x] = y;
+                    bottom[x] = y;
+                }
+                const selectFront = (x, y) => { if (x >= 0 && y >= 0 && x < CANVAS_SIZE && y < CANVAS_SIZE) masks.front[maskIndex(x, y)] = 1; };
+                for (let y = 0; y < CANVAS_SIZE; y++) for (let x = 0; x < CANVAS_SIZE; x++) {
+                    if (!mask[maskIndex(x, y)]) continue;
+                    if (this.activeOrientation === "front") selectFront(x, y);
+                    else if (this.activeOrientation === "back") selectFront(CANVAS_SIZE - 1 - x, y);
+                    else if (this.activeOrientation === "right" && containsDepthZ(range, 31 - x)) selectFront(right[y], y);
+                    else if (this.activeOrientation === "left" && containsDepthZ(range, x - 32)) selectFront(left[y], y);
+                    else if (this.activeOrientation === "top" && containsDepthZ(range, y - 32)) selectFront(x, top[x]);
+                    else if (this.activeOrientation === "bottom" && containsDepthZ(range, 31 - y)) selectFront(x, bottom[x]);
+                }
+                for (let y = 0; y < CANVAS_SIZE; y++) for (let x = 0; x < CANVAS_SIZE; x++) {
+                    if (!masks.front[maskIndex(x, y)]) continue;
+                    masks.back[maskIndex(CANVAS_SIZE - 1 - x, y)] = 1;
+                    if (x === right[y]) for (let z = range.start; z < range.end; z++) masks.right[maskIndex(31 - z, y)] = 1;
+                    if (x === left[y]) for (let z = range.start; z < range.end; z++) masks.left[maskIndex(32 + z, y)] = 1;
+                    if (y === top[x]) for (let z = range.start; z < range.end; z++) masks.top[maskIndex(x, 32 + z)] = 1;
+                    if (y === bottom[x]) for (let z = range.start; z < range.end; z++) masks.bottom[maskIndex(x, 31 - z)] = 1;
+                }
+                return masks;
+            },
+
+            relativeTranslation(orientation, dx, dy) {
+                if (orientation === "back") return [-dx, dy];
+                if (orientation === "right" || orientation === "left") return [0, dy];
+                if (orientation === "top" || orientation === "bottom") return [dx, 0];
+                return [dx, dy];
+            },
+
+            translateRelativeViews(mask, dx, dy) {
+                const masks = this.relativeSelectionMasks(mask);
+                for (const orientation of ORIENTATIONS) {
+                    const canvas = this.canvasFor(this.activeLayerId, orientation.id);
+                    const context = canvas.getContext("2d");
+                    const pixels = maskedLayerPixels(canvas, masks[orientation.id]);
+                    const [moveX, moveY] = this.relativeTranslation(orientation.id, dx, dy);
+                    clearMaskedPixels(context, masks[orientation.id]);
+                    context.drawImage(pixels, moveX, moveY);
+                    if (orientation.id !== "front") editedViews.add(this.layerViewKey(this.activeLayerId, orientation.id));
+                }
+            },
+
+            flipRelativeViews(mask, bounds, horizontal, vertical) {
+                const masks = this.relativeSelectionMasks(mask);
+                const sources = Object.fromEntries(ORIENTATIONS.map((orientation) => [orientation.id, this.canvasFor(this.activeLayerId, orientation.id).getContext("2d").getImageData(0, 0, LAYER_SIZE, LAYER_SIZE)]));
+                const results = Object.fromEntries(ORIENTATIONS.map((orientation) => [orientation.id, new ImageData(new Uint8ClampedArray(sources[orientation.id].data), LAYER_SIZE, LAYER_SIZE)]));
+                for (const orientation of ORIENTATIONS) for (let index = 0; index < masks[orientation.id].length; index++) if (masks[orientation.id][index]) results[orientation.id].data.fill(0, index * 4, index * 4 + 4);
+                const reflectX = (x) => bounds.x * 2 + bounds.width - 1 - x;
+                const reflectBackX = (x) => (CANVAS_SIZE - bounds.x - bounds.width) * 2 + bounds.width - 1 - x;
+                const reflectY = (y) => bounds.y * 2 + bounds.height - 1 - y;
+                for (const orientation of ORIENTATIONS) for (let y = 0; y < CANVAS_SIZE; y++) for (let x = 0; x < CANVAS_SIZE; x++) {
+                    const sourceIndex = maskIndex(x, y);
+                    if (!masks[orientation.id][sourceIndex]) continue;
+                    let targetOrientation = orientation.id;
+                    let targetX = x;
+                    let targetY = y;
+                    if (horizontal) {
+                        if (orientation.id === "front" || orientation.id === "top" || orientation.id === "bottom") targetX = reflectX(x);
+                        else if (orientation.id === "back") targetX = reflectBackX(x);
+                        else {
+                            targetOrientation = orientation.id === "right" ? "left" : "right";
+                            targetX = CANVAS_SIZE - 1 - x;
+                        }
+                    } else if (vertical) {
+                        if (orientation.id === "front" || orientation.id === "back" || orientation.id === "right" || orientation.id === "left") targetY = reflectY(y);
+                        else {
+                            targetOrientation = orientation.id === "top" ? "bottom" : "top";
+                            targetY = CANVAS_SIZE - 1 - y;
+                        }
+                    }
+                    const targetIndex = maskIndex(targetX, targetY);
+                    results[targetOrientation].data.set(sources[orientation.id].data.subarray(sourceIndex * 4, sourceIndex * 4 + 4), targetIndex * 4);
+                }
+                for (const orientation of ORIENTATIONS) {
+                    this.canvasFor(this.activeLayerId, orientation.id).getContext("2d").putImageData(results[orientation.id], 0, 0);
+                    if (orientation.id !== "front") editedViews.add(this.layerViewKey(this.activeLayerId, orientation.id));
+                }
+            },
+
             pasteSelection() {
                 if (!internalClipboard) return;
                 this.pushHistory();
                 const layer = this.addLayer("Pasted Selection", false);
-                this.markViewEdited(layer.id);
-                const { pixels, mask, bounds, quantizedPalette } = internalClipboard;
-                this.canvasFor(layer.id).getContext("2d").drawImage(pixels, bounds.x + LAYER_PADDING, bounds.y + LAYER_PADDING);
-                if (quantizedPalette) {
-                    const palette = [...quantizedPalette.palette];
-                    quantizedPalettes.set(this.layerViewKey(layer.id), { palette, colors: palette.map(hexColor), allowed: new Set(palette), confirmed: quantizedPalette.confirmed, locked: quantizedPalette.locked });
+                layer.depth = internalClipboard.depth;
+                layer.offset = internalClipboard.offset;
+                this.normalizeLayerOffsets();
+                for (const orientation of ORIENTATIONS) {
+                    const key = this.layerViewKey(layer.id, orientation.id);
+                    this.canvasFor(layer.id, orientation.id).getContext("2d").drawImage(internalClipboard.views[orientation.id], 0, 0);
+                    if (orientation.id !== "front") editedViews.add(key);
+                    const sourcePalette = internalClipboard.palettes[orientation.id];
+                    if (sourcePalette) {
+                        const palette = [...sourcePalette.palette];
+                        quantizedPalettes.set(key, { palette, colors: palette.map(hexColor), allowed: new Set(palette), confirmed: sourcePalette.confirmed, locked: sourcePalette.locked });
+                    }
                 }
-                this.setSelectionMask(new Uint8Array(mask));
+                this.setSelectionMask(new Uint8Array(internalClipboard.mask));
                 this.render();
             },
 
             handleKeydown(event) {
                 if (event.isComposing) return;
+                if (event.key === "Enter" && event.target.matches?.("input:not([type]), input[type='text'], input[type='number']")) {
+                    event.preventDefault();
+                    event.target.blur();
+                    return;
+                }
                 const command = event.ctrlKey || event.metaKey;
                 const key = event.key.toLowerCase();
+                if (command && ["a", "c", "d", "v", "x"].includes(key) && event.target.closest?.(".layer-name")) return;
                 const run = (action) => {
                     event.preventDefault();
                     this.blurActiveControl();
@@ -3120,7 +3786,7 @@ document.addEventListener("alpine:init", () => {
                     return;
                 }
                 if (command && key === "d") {
-                    run(() => this.clearSelection());
+                    run(() => this.duplicateLayer());
                     return;
                 }
                 if (!command && !event.altKey && event.target.closest?.("input, textarea, select, [contenteditable]")) return;
@@ -3181,6 +3847,7 @@ document.addEventListener("alpine:init", () => {
             },
 
             handlePaste(event) {
+                if (event.target.closest?.(".layer-name")) return;
                 if (previewDrag?.mode === "rotate" || voxelPan) {
                     event.preventDefault();
                     return;
