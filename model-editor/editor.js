@@ -278,9 +278,11 @@ document.addEventListener("alpine:init", () => {
         let nextGroupId = 0;
         let selectionAnchor = null;
         let selectionMask = null;
+        let perspectiveSelectionMasks = null;
         let moveState = null;
         let straightStroke = null;
         let internalClipboard = null;
+        let pasteAuthorizedUntil = 0;
         let layerValueEdit = null;
         let pointerTarget = null;
         let quantizationSource = null;
@@ -2555,7 +2557,7 @@ document.addEventListener("alpine:init", () => {
                 this.activeOrientation = id;
                 const target = this.orientationRotation();
                 if (voxelViewRoot) voxelViewRoot.rotation.set(-target.x, -target.y, 0);
-                this.clearSelection();
+                if (perspectiveSelectionMasks) this.setSelectionMask(new Uint8Array(perspectiveSelectionMasks[id]), false);
                 this.clearHover();
                 this.render();
                 this.refreshUI();
@@ -2602,17 +2604,19 @@ document.addEventListener("alpine:init", () => {
                 };
             },
 
-            setSelectionMask(mask) {
+            setSelectionMask(mask, syncPerspectives = true) {
                 selectionMask = mask;
                 this.selection = maskBounds(mask);
                 this.selectionPath = this.selection ? maskPath(mask) : "";
                 if (!this.selection) selectionMask = null;
+                if (syncPerspectives) perspectiveSelectionMasks = this.selection ? this.relativeSelectionMasks(selectionMask) : null;
                 if (this.selection && (selectionAnchor || moveState)) this.updateSelectionGuides(this.selection, 0, 0);
                 this.renderVoxelSelection();
             },
 
             clearSelection() {
                 selectionMask = null;
+                perspectiveSelectionMasks = null;
                 this.selection = null;
                 this.selectionPath = "";
                 this.clearCenterGuides();
@@ -2634,6 +2638,7 @@ document.addEventListener("alpine:init", () => {
             },
 
             closeContextMenus(event) {
+                if (event.button === 1) event.preventDefault();
                 if (this.canvasMenu && !event.target.closest(".canvas-context-menu")) this.canvasMenu = null;
                 if (this.layerMenu && !event.target.closest(".layer-context-menu")) this.layerMenu = null;
             },
@@ -3395,6 +3400,7 @@ document.addEventListener("alpine:init", () => {
                     layerSelectionAnchorId: this.layerSelectionAnchorId,
                     editedViews: [...editedViews],
                     selectionMask: selectionMask ? new Uint8Array(selectionMask) : null,
+                    perspectiveSelectionMasks: perspectiveSelectionMasks && Object.fromEntries(ORIENTATIONS.map((orientation) => [orientation.id, new Uint8Array(perspectiveSelectionMasks[orientation.id])])),
                     pixels: ORIENTATIONS.flatMap((orientation) => this.layers.map(({ id }) => ({
                         key: viewKey(orientation.id, id),
                         data: this.canvasFor(id, orientation.id).getContext("2d").getImageData(0, 0, LAYER_SIZE, LAYER_SIZE),
@@ -3421,7 +3427,10 @@ document.addEventListener("alpine:init", () => {
                 this.layerSelectionAnchorId = layerIds.has(snapshot.layerSelectionAnchorId) ? snapshot.layerSelectionAnchorId : this.activeLayerId;
                 editedViews.clear();
                 for (const key of snapshot.editedViews ?? []) editedViews.add(key);
-                if (snapshot.selectionMask) this.setSelectionMask(new Uint8Array(snapshot.selectionMask));
+                if (snapshot.perspectiveSelectionMasks) {
+                    perspectiveSelectionMasks = Object.fromEntries(ORIENTATIONS.map((orientation) => [orientation.id, new Uint8Array(snapshot.perspectiveSelectionMasks[orientation.id])]));
+                    this.setSelectionMask(new Uint8Array(perspectiveSelectionMasks[this.activeOrientation]), false);
+                } else if (snapshot.selectionMask) this.setSelectionMask(new Uint8Array(snapshot.selectionMask));
                 else this.clearSelection();
                 selectionAnchor = null;
                 moveState = null;
@@ -3472,7 +3481,8 @@ document.addEventListener("alpine:init", () => {
                     paletteOrders: [...paletteOrders].map(([key, palette]) => ({ key, palette: [...palette] })),
                     importedPalettes: this.importedPalettes.map((entry) => ({ ...entry, colors: [...entry.colors] })),
                     editedViews: [...editedViews],
-                    selectionMask: selectionMask ? [...selectionMask] : null,
+                    selectionMask: perspectiveSelectionMasks ? [...perspectiveSelectionMasks.front] : selectionMask ? [...selectionMask] : null,
+                    perspectiveSelectionMasks: perspectiveSelectionMasks && Object.fromEntries(ORIENTATIONS.map((orientation) => [orientation.id, [...perspectiveSelectionMasks[orientation.id]]])),
                     activeLayerId: this.activeLayerId,
                     activeGroupId: this.activeGroupId,
                     selectedLayerIds: [...this.selectedLayerIds],
@@ -3557,7 +3567,10 @@ document.addEventListener("alpine:init", () => {
                     nextLayerId = Math.max(Number(project.counters?.layer) || 0, ...this.layers.map((layer) => Number(layer.id.match(/\d+$/)?.[0]) || 0));
                     nextGroupId = Math.max(Number(project.counters?.group) || 0, ...this.groups.map((group) => Number(group.id.match(/\d+$/)?.[0]) || 0));
                     nextPaletteId = Math.max(Number(project.counters?.palette) || 0, ...this.importedPalettes.map((entry) => Number(entry.id.match(/\d+$/)?.[0]) || 0));
-                    if (project.selectionMask?.length === LAYER_SIZE * LAYER_SIZE) this.setSelectionMask(new Uint8Array(project.selectionMask));
+                    if (ORIENTATIONS.every((orientation) => project.perspectiveSelectionMasks?.[orientation.id]?.length === LAYER_SIZE * LAYER_SIZE)) {
+                        perspectiveSelectionMasks = Object.fromEntries(ORIENTATIONS.map((orientation) => [orientation.id, new Uint8Array(project.perspectiveSelectionMasks[orientation.id])]));
+                        this.setSelectionMask(new Uint8Array(perspectiveSelectionMasks.front), false);
+                    } else if (project.selectionMask?.length === LAYER_SIZE * LAYER_SIZE) this.setSelectionMask(new Uint8Array(project.selectionMask));
                     else this.clearSelection();
                     this.history = [];
                     this.future = [];
@@ -3669,6 +3682,7 @@ document.addEventListener("alpine:init", () => {
                     if (y === top[x]) for (let z = range.start; z < range.end; z++) masks.top[maskIndex(x, 32 + z)] = 1;
                     if (y === bottom[x]) for (let z = range.start; z < range.end; z++) masks.bottom[maskIndex(x, 31 - z)] = 1;
                 }
+                masks[this.activeOrientation] = new Uint8Array(mask);
                 return masks;
             },
 
@@ -3759,6 +3773,7 @@ document.addEventListener("alpine:init", () => {
                 }
                 const command = event.ctrlKey || event.metaKey;
                 const key = event.key.toLowerCase();
+                if (command && key === "v") pasteAuthorizedUntil = performance.now() + 1000;
                 if (command && ["a", "c", "d", "v", "x"].includes(key) && event.target.closest?.(".layer-name")) return;
                 const run = (action) => {
                     event.preventDefault();
@@ -3778,6 +3793,7 @@ document.addEventListener("alpine:init", () => {
                     return;
                 }
                 if (command && key === "v" && internalClipboard) {
+                    pasteAuthorizedUntil = 0;
                     run(() => this.pasteSelection());
                     return;
                 }
@@ -3847,6 +3863,11 @@ document.addEventListener("alpine:init", () => {
             },
 
             handlePaste(event) {
+                if (performance.now() >= pasteAuthorizedUntil) {
+                    event.preventDefault();
+                    return;
+                }
+                pasteAuthorizedUntil = 0;
                 if (event.target.closest?.(".layer-name")) return;
                 if (previewDrag?.mode === "rotate" || voxelPan) {
                     event.preventDefault();
