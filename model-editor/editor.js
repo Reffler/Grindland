@@ -356,6 +356,7 @@ document.addEventListener("alpine:init", () => {
             gridVisible: false,
             verticalSymmetry: false,
             horizontalSymmetry: false,
+            linkPerspectiveSelections: true,
             voxelReady: false,
             voxelZoom: 1,
             previewPreset: "perspective",
@@ -1113,27 +1114,59 @@ document.addEventListener("alpine:init", () => {
                 voxelGrid.position.z = editingSurface + visibleLayers.length * 0.001 + 0.01;
                 for (const [index, layer] of visibleLayers.entries()) {
                     const pixels = this.canvasFor(layer.id, "front").getContext("2d").getImageData(LAYER_PADDING, LAYER_PADDING, CANVAS_SIZE, CANVAS_SIZE).data;
-                    const mesh = ensureMesh(voxelLayerMeshes, layer.id, voxelGeometry, countOpaque(pixels));
                     const range = ranges.get(layer.id);
-                    const depth = range.end - range.start;
+                    const backPixels = this.canvasFor(layer.id, "back").getContext("2d").getImageData(LAYER_PADDING, LAYER_PADDING, CANVAS_SIZE, CANVAS_SIZE).data;
+                    const rightPixels = this.canvasFor(layer.id, "right").getContext("2d").getImageData(LAYER_PADDING, LAYER_PADDING, CANVAS_SIZE, CANVAS_SIZE).data;
+                    const leftPixels = this.canvasFor(layer.id, "left").getContext("2d").getImageData(LAYER_PADDING, LAYER_PADDING, CANVAS_SIZE, CANVAS_SIZE).data;
+                    const topPixels = this.canvasFor(layer.id, "top").getContext("2d").getImageData(LAYER_PADDING, LAYER_PADDING, CANVAS_SIZE, CANVAS_SIZE).data;
+                    const bottomPixels = this.canvasFor(layer.id, "bottom").getContext("2d").getImageData(LAYER_PADDING, LAYER_PADDING, CANVAS_SIZE, CANVAS_SIZE).data;
+                    const occupied = (x, y, z) => pixels[(y * CANVAS_SIZE + x) * 4 + 3]
+                        && backPixels[(y * CANVAS_SIZE + CANVAS_SIZE - 1 - x) * 4 + 3]
+                        && rightPixels[(y * CANVAS_SIZE + 31 - z) * 4 + 3]
+                        && leftPixels[(y * CANVAS_SIZE + 32 + z) * 4 + 3]
+                        && topPixels[((32 + z) * CANVAS_SIZE + x) * 4 + 3]
+                        && bottomPixels[((31 - z) * CANVAS_SIZE + x) * 4 + 3];
+                    let segmentCount = 0;
+                    for (let y = 0; y < CANVAS_SIZE; y++) for (let x = 0; x < CANVAS_SIZE; x++) {
+                        if (!pixels[(y * CANVAS_SIZE + x) * 4 + 3]) continue;
+                        let inside = false;
+                        for (let z = range.start; z < range.end; z++) {
+                            const next = !!occupied(x, y, z);
+                            if (next && !inside) segmentCount++;
+                            inside = next;
+                        }
+                    }
+                    const mesh = ensureMesh(voxelLayerMeshes, layer.id, voxelGeometry, segmentCount);
                     const offset = (visibleLayers.length - index) * 0.001;
-                    const left = new Int16Array(CANVAS_SIZE).fill(-1);
-                    const right = new Int16Array(CANVAS_SIZE).fill(-1);
-                    const top = new Int16Array(CANVAS_SIZE).fill(-1);
-                    const bottom = new Int16Array(CANVAS_SIZE).fill(-1);
+                    const left = new Int16Array(CANVAS_SIZE * CANVAS_SIZE).fill(-1);
+                    const right = new Int16Array(CANVAS_SIZE * CANVAS_SIZE).fill(-1);
+                    const top = new Int16Array(CANVAS_SIZE * CANVAS_SIZE).fill(-1);
+                    const bottom = new Int16Array(CANVAS_SIZE * CANVAS_SIZE).fill(-1);
                     let count = 0;
-                    matrix.makeScale(1, 1, depth);
                     for (let y = 0; y < CANVAS_SIZE; y++) for (let x = 0; x < CANVAS_SIZE; x++) {
                         const pixelOffset = (y * CANVAS_SIZE + x) * 4;
                         if (!pixels[pixelOffset + 3]) continue;
-                        matrix.setPosition(x - 31.5, 31.5 - y, range.start + depth / 2);
-                        mesh.setMatrixAt(count, matrix);
                         color.setRGB(pixels[pixelOffset] / 255, pixels[pixelOffset + 1] / 255, pixels[pixelOffset + 2] / 255, THREE.SRGBColorSpace);
-                        mesh.setColorAt(count++, color);
-                        if (left[y] < 0) left[y] = x;
-                        right[y] = x;
-                        if (top[x] < 0) top[x] = y;
-                        bottom[x] = y;
+                        let runStart = null;
+                        for (let z = range.start; z <= range.end; z++) {
+                            const next = z < range.end && occupied(x, y, z);
+                            if (next) {
+                                const rowIndex = y * CANVAS_SIZE + z + 32;
+                                const columnIndex = x * CANVAS_SIZE + z + 32;
+                                if (left[rowIndex] < 0) left[rowIndex] = x;
+                                right[rowIndex] = x;
+                                if (top[columnIndex] < 0) top[columnIndex] = y;
+                                bottom[columnIndex] = y;
+                            }
+                            if (next && runStart === null) runStart = z;
+                            if ((!next || z === range.end) && runStart !== null) {
+                                matrix.makeScale(1, 1, z - runStart);
+                                matrix.setPosition(x - 31.5, 31.5 - y, runStart + (z - runStart) / 2);
+                                mesh.setMatrixAt(count, matrix);
+                                mesh.setColorAt(count++, color);
+                                runStart = null;
+                            }
+                        }
                     }
                     mesh.visible = true;
                     mesh.count = count;
@@ -1153,23 +1186,27 @@ document.addEventListener("alpine:init", () => {
                             const pixelOffset = (y * CANVAS_SIZE + x) * 4;
                             if (!facePixels[pixelOffset + 3]) continue;
                             let position = null;
-                            if (orientation.id === "front" && pixels[pixelOffset + 3]) position = [x - 31.5, 31.5 - y, range.end + offset + 0.002];
-                            if (orientation.id === "back" && pixels[(y * CANVAS_SIZE + CANVAS_SIZE - 1 - x) * 4 + 3]) position = [31.5 - x, 31.5 - y, range.start - offset - 0.002];
+                            if (orientation.id === "front" && occupied(x, y, range.end - 1)) position = [x - 31.5, 31.5 - y, range.end + offset + 0.002];
+                            if (orientation.id === "back" && occupied(CANVAS_SIZE - 1 - x, y, range.start)) position = [31.5 - x, 31.5 - y, range.start - offset - 0.002];
                             if (orientation.id === "right") {
                                 const z = 31 - x;
-                                if (right[y] >= 0 && containsDepthZ(range, z)) position = [right[y] - 31.5 + 0.502 + offset, 31.5 - y, z + 0.5];
+                                const edge = containsDepthZ(range, z) ? right[y * CANVAS_SIZE + z + 32] : -1;
+                                if (edge >= 0) position = [edge - 31.5 + 0.502 + offset, 31.5 - y, z + 0.5];
                             }
                             if (orientation.id === "left") {
                                 const z = x - 32;
-                                if (left[y] >= 0 && containsDepthZ(range, z)) position = [left[y] - 31.5 - 0.502 - offset, 31.5 - y, z + 0.5];
+                                const edge = containsDepthZ(range, z) ? left[y * CANVAS_SIZE + z + 32] : -1;
+                                if (edge >= 0) position = [edge - 31.5 - 0.502 - offset, 31.5 - y, z + 0.5];
                             }
                             if (orientation.id === "top") {
                                 const z = y - 32;
-                                if (top[x] >= 0 && containsDepthZ(range, z)) position = [x - 31.5, 31.5 - top[x] + 0.502 + offset, z + 0.5];
+                                const edge = containsDepthZ(range, z) ? top[x * CANVAS_SIZE + z + 32] : -1;
+                                if (edge >= 0) position = [x - 31.5, 31.5 - edge + 0.502 + offset, z + 0.5];
                             }
                             if (orientation.id === "bottom") {
                                 const z = 31 - y;
-                                if (bottom[x] >= 0 && containsDepthZ(range, z)) position = [x - 31.5, 31.5 - bottom[x] - 0.502 - offset, z + 0.5];
+                                const edge = containsDepthZ(range, z) ? bottom[x * CANVAS_SIZE + z + 32] : -1;
+                                if (edge >= 0) position = [x - 31.5, 31.5 - edge - 0.502 - offset, z + 0.5];
                             }
                             if (!position) continue;
                             matrix.makeTranslation(...position);
@@ -1879,7 +1916,7 @@ document.addEventListener("alpine:init", () => {
                 this.activeGroupId = null;
                 this.selectedLayerIds = this.activeLayerId ? [this.activeLayerId] : [];
                 this.layerSelectionAnchorId = this.activeLayerId;
-                if (!this.activeLayerId) this.clearSelection();
+                if (!this.activeLayerId) this.clearSelection(true);
                 this.render();
             },
 
@@ -1918,10 +1955,53 @@ document.addEventListener("alpine:init", () => {
                 if (depth === limits.max) this.flashPreviewWall("back");
                 else if (depth === limits.min) this.flashPreviewWall("front");
                 if (layerDepth(layer) === depth) return;
+                const previousRange = layerDepthRanges(this.layers).get(layer.id);
                 this.recordLayerValueEdit(layer, "depth");
                 layer.depth = depth;
                 this.normalizeLayerOffsets();
+                this.extendLayerDepthViews(layer.id, previousRange, layerDepthRanges(this.layers).get(layer.id));
+                input.value = layer.depth;
                 this.render();
+            },
+
+            extendLayerDepthViews(id, previousRange, nextRange) {
+                const added = [];
+                for (let z = nextRange.start; z < nextRange.end; z++) if (!containsDepthZ(previousRange, z)) added.push(z);
+                if (!added.length) return;
+                const front = this.canvasFor(id, "front").getContext("2d").getImageData(LAYER_PADDING, LAYER_PADDING, CANVAS_SIZE, CANVAS_SIZE);
+                const views = Object.fromEntries(ORIENTATIONS.slice(2).map((orientation) => [orientation.id, this.canvasFor(id, orientation.id).getContext("2d").getImageData(LAYER_PADDING, LAYER_PADDING, CANVAS_SIZE, CANVAS_SIZE)]));
+                const left = new Int32Array(CANVAS_SIZE).fill(-1);
+                const right = new Int32Array(CANVAS_SIZE).fill(-1);
+                const top = new Int32Array(CANVAS_SIZE).fill(-1);
+                const bottom = new Int32Array(CANVAS_SIZE).fill(-1);
+                for (let y = 0; y < CANVAS_SIZE; y++) for (let x = 0; x < CANVAS_SIZE; x++) {
+                    const offset = (y * CANVAS_SIZE + x) * 4;
+                    if (!front.data[offset + 3]) continue;
+                    if (left[y] < 0) left[y] = offset;
+                    right[y] = offset;
+                    if (top[x] < 0) top[x] = offset;
+                    bottom[x] = offset;
+                }
+                const copy = (sourceOffset, target, x, y) => {
+                    if (sourceOffset < 0) return;
+                    const targetOffset = (y * CANVAS_SIZE + x) * 4;
+                    target.data.set(front.data.subarray(sourceOffset, sourceOffset + 4), targetOffset);
+                };
+                for (const z of added) {
+                    for (let y = 0; y < CANVAS_SIZE; y++) {
+                        copy(right[y], views.right, 31 - z, y);
+                        copy(left[y], views.left, 32 + z, y);
+                    }
+                    for (let x = 0; x < CANVAS_SIZE; x++) {
+                        copy(top[x], views.top, x, 32 + z);
+                        copy(bottom[x], views.bottom, x, 31 - z);
+                    }
+                }
+                for (const orientation of ORIENTATIONS.slice(2)) {
+                    const key = viewKey(orientation.id, id);
+                    this.canvasFor(id, orientation.id).getContext("2d").putImageData(views[orientation.id], LAYER_PADDING, LAYER_PADDING);
+                    paletteSources.delete(key);
+                }
             },
 
             normalizeLayerOffsets() {
@@ -2564,6 +2644,19 @@ document.addEventListener("alpine:init", () => {
                 this.snapVoxelRotation();
             },
 
+            togglePerspectiveSelectionLink() {
+                this.linkPerspectiveSelections = !this.linkPerspectiveSelections;
+                if (this.linkPerspectiveSelections && perspectiveSelectionMasks) {
+                    const combined = Object.fromEntries(ORIENTATIONS.map((orientation) => [orientation.id, new Uint8Array(LAYER_SIZE * LAYER_SIZE)]));
+                    for (const source of ORIENTATIONS) {
+                        const linked = this.relativeSelectionMasks(perspectiveSelectionMasks[source.id], source.id);
+                        for (const target of ORIENTATIONS) for (let index = 0; index < linked[target.id].length; index++) if (linked[target.id][index]) combined[target.id][index] = 1;
+                    }
+                    perspectiveSelectionMasks = combined;
+                    this.setSelectionMask(new Uint8Array(combined[this.activeOrientation]), false);
+                }
+            },
+
             voxelPointFromEvent(event) {
                 if (!voxelRaycaster || !voxelViewRoot) return null;
                 const rect = this.$refs.voxelCanvas.getBoundingClientRect();
@@ -2609,14 +2702,19 @@ document.addEventListener("alpine:init", () => {
                 this.selection = maskBounds(mask);
                 this.selectionPath = this.selection ? maskPath(mask) : "";
                 if (!this.selection) selectionMask = null;
-                if (syncPerspectives) perspectiveSelectionMasks = this.selection ? this.relativeSelectionMasks(selectionMask) : null;
+                if (syncPerspectives && this.linkPerspectiveSelections) perspectiveSelectionMasks = this.selection ? this.relativeSelectionMasks(selectionMask) : null;
+                else if (syncPerspectives) {
+                    perspectiveSelectionMasks ??= Object.fromEntries(ORIENTATIONS.map((orientation) => [orientation.id, new Uint8Array(LAYER_SIZE * LAYER_SIZE)]));
+                    perspectiveSelectionMasks[this.activeOrientation] = selectionMask ? new Uint8Array(selectionMask) : new Uint8Array(LAYER_SIZE * LAYER_SIZE);
+                }
                 if (this.selection && (selectionAnchor || moveState)) this.updateSelectionGuides(this.selection, 0, 0);
                 this.renderVoxelSelection();
             },
 
-            clearSelection() {
+            clearSelection(allPerspectives = false) {
                 selectionMask = null;
-                perspectiveSelectionMasks = null;
+                if (allPerspectives || this.linkPerspectiveSelections) perspectiveSelectionMasks = null;
+                else if (perspectiveSelectionMasks) perspectiveSelectionMasks[this.activeOrientation] = new Uint8Array(LAYER_SIZE * LAYER_SIZE);
                 this.selection = null;
                 this.selectionPath = "";
                 this.clearCenterGuides();
@@ -2652,29 +2750,13 @@ document.addEventListener("alpine:init", () => {
                 this.markViewEdited();
                 const bounds = { ...this.selection };
                 const mask = new Uint8Array(selectionMask);
-                const flippedMask = new Uint8Array(mask);
-                for (let index = 0; index < mask.length; index++) if (mask[index]) flippedMask[index] = 0;
-                for (let y = bounds.y; y < bounds.y + bounds.height; y++) for (let x = bounds.x; x < bounds.x + bounds.width; x++) if (mask[maskIndex(x, y)]) {
-                    const targetX = horizontal ? bounds.x + bounds.width - 1 - (x - bounds.x) : x;
-                    const targetY = vertical ? bounds.y + bounds.height - 1 - (y - bounds.y) : y;
-                    flippedMask[maskIndex(targetX, targetY)] = 1;
-                }
-                if (this.activeOrientation === "front") this.flipRelativeViews(mask, bounds, horizontal, vertical);
-                else {
-                    const context = this.activeContext();
-                    const pixels = selectionPixels(this.canvasFor(), mask, bounds);
-                    clearMaskedPixels(context, mask);
-                    clearMaskedPixels(context, flippedMask);
-                    context.save();
-                    context.translate(bounds.x + LAYER_PADDING + (horizontal ? bounds.width : 0), bounds.y + LAYER_PADDING + (vertical ? bounds.height : 0));
-                    context.scale(horizontal ? -1 : 1, vertical ? -1 : 1);
-                    context.drawImage(pixels, 0, 0);
-                    context.restore();
-                }
+                const transformedMasks = this.flipRelativeViews(mask, bounds, horizontal, vertical);
+                const flippedMask = transformedMasks[this.activeOrientation];
                 const context = this.activeContext();
                 const result = context.getImageData(0, 0, LAYER_SIZE, LAYER_SIZE).data;
                 for (let index = 0; index < flippedMask.length; index++) if (flippedMask[index] && !result[index * 4 + 3]) flippedMask[index] = 0;
-                this.setSelectionMask(flippedMask);
+                perspectiveSelectionMasks = transformedMasks;
+                this.setSelectionMask(new Uint8Array(flippedMask), false);
                 this.canvasMenu = null;
                 this.render();
             },
@@ -2782,7 +2864,7 @@ document.addEventListener("alpine:init", () => {
                 this.selectedLayerIds = [target.id];
                 this.layerSelectionAnchorId = target.id;
                 this.layerMenu = null;
-                this.clearSelection();
+                this.clearSelection(true);
                 this.normalizeLayerOffsets();
                 this.render();
                 this.refreshUI();
@@ -3224,7 +3306,7 @@ document.addEventListener("alpine:init", () => {
                 const selection = { ...this.selection };
                 const mask = new Uint8Array(selectionMask);
                 const pixels = selectionPixels(this.canvasFor(), mask, selection);
-                const relativeMasks = this.activeOrientation === "front" ? this.relativeSelectionMasks(mask) : null;
+                const relativeMasks = this.transformSelectionMasks(mask);
                 this.pointerId = event.pointerId;
                 moveState = {
                     start: point,
@@ -3232,7 +3314,7 @@ document.addEventListener("alpine:init", () => {
                     mask,
                     pixels,
                     base: this.activeContext().getImageData(0, 0, LAYER_SIZE, LAYER_SIZE),
-                    relativeViews: relativeMasks && ORIENTATIONS.map((orientation) => ({
+                    relativeViews: ORIENTATIONS.map((orientation) => ({
                         orientation: orientation.id,
                         mask: relativeMasks[orientation.id],
                         pixels: maskedLayerPixels(this.canvasFor(this.activeLayerId, orientation.id), relativeMasks[orientation.id]),
@@ -3260,24 +3342,23 @@ document.addEventListener("alpine:init", () => {
                 if (!moveState.recorded) {
                     this.pushHistory();
                     this.markViewEdited();
-                    if (moveState.relativeViews) for (const orientation of ORIENTATIONS.slice(1)) editedViews.add(this.layerViewKey(this.activeLayerId, orientation.id));
+                    for (const orientation of ORIENTATIONS.slice(1)) editedViews.add(this.layerViewKey(this.activeLayerId, orientation.id));
                     moveState.recorded = true;
                 }
                 moveState.dx = dx;
                 moveState.dy = dy;
-                if (moveState.relativeViews) for (const view of moveState.relativeViews) {
+                for (const view of moveState.relativeViews) {
                     const context = this.canvasFor(this.activeLayerId, view.orientation).getContext("2d");
                     const [moveX, moveY] = this.relativeTranslation(view.orientation, dx, dy);
                     context.putImageData(view.base, 0, 0);
                     clearMaskedPixels(context, view.mask);
                     context.drawImage(view.pixels, moveX, moveY);
-                } else {
-                    const context = this.activeContext();
-                    context.putImageData(moveState.base, 0, 0);
-                    clearMaskedPixels(context, moveState.mask);
-                    context.drawImage(moveState.pixels, selection.x + dx + LAYER_PADDING, selection.y + dy + LAYER_PADDING);
                 }
-                this.setSelectionMask(translateMask(moveState.mask, dx, dy));
+                perspectiveSelectionMasks = Object.fromEntries(moveState.relativeViews.map((view) => {
+                    const [moveX, moveY] = this.relativeTranslation(view.orientation, dx, dy);
+                    return [view.orientation, translateMask(view.mask, moveX, moveY)];
+                }));
+                this.setSelectionMask(new Uint8Array(perspectiveSelectionMasks[this.activeOrientation]), false);
                 this.queueRender();
             },
 
@@ -3294,6 +3375,7 @@ document.addEventListener("alpine:init", () => {
 
             paint(x, y) {
                 const context = this.activeContext();
+                const eraseMask = this.tool === "eraser" ? new Uint8Array(LAYER_SIZE * LAYER_SIZE) : null;
                 const size = Math.max(1, Math.min(16, Number(this.activeBrushSize()) || 1));
                 const startX = x - Math.floor((size - 1) / 2);
                 const startY = y - Math.floor((size - 1) / 2);
@@ -3305,10 +3387,11 @@ document.addEventListener("alpine:init", () => {
                     if (this.verticalSymmetry && this.horizontalSymmetry) points.push([CANVAS_SIZE - 1 - px, CANVAS_SIZE - 1 - py]);
                     for (const [paintX, paintY] of points) {
                         if (selectionMask && !selectionMask[maskIndex(paintX, paintY)]) continue;
-                        if (this.tool === "eraser") context.clearRect(paintX + LAYER_PADDING, paintY + LAYER_PADDING, 1, 1);
+                        if (eraseMask) eraseMask[maskIndex(paintX, paintY)] = 1;
                         else context.fillRect(paintX + LAYER_PADDING, paintY + LAYER_PADDING, 1, 1);
                     }
                 }
+                if (eraseMask) this.clearPerspectivePixels(this.relativeSelectionMasks(eraseMask, this.activeOrientation), false);
             },
 
             drawLine(from, to) {
@@ -3349,6 +3432,7 @@ document.addEventListener("alpine:init", () => {
                 straightStroke = event.shiftKey && (this.tool === "pencil" || this.tool === "eraser") ? {
                     start: this.lastPoint,
                     pixels: this.activeContext().getImageData(0, 0, LAYER_SIZE, LAYER_SIZE),
+                    views: this.tool === "eraser" && Object.fromEntries(ORIENTATIONS.map((orientation) => [orientation.id, this.canvasFor(this.activeLayerId, orientation.id).getContext("2d").getImageData(0, 0, LAYER_SIZE, LAYER_SIZE)])),
                     axis: null,
                 } : null;
                 this.paint(this.lastPoint.x, this.lastPoint.y);
@@ -3361,6 +3445,7 @@ document.addEventListener("alpine:init", () => {
                 if (!straightStroke && event.shiftKey && (this.tool === "pencil" || this.tool === "eraser")) straightStroke = {
                     start: this.lastPoint,
                     pixels: this.activeContext().getImageData(0, 0, LAYER_SIZE, LAYER_SIZE),
+                    views: this.tool === "eraser" && Object.fromEntries(ORIENTATIONS.map((orientation) => [orientation.id, this.canvasFor(this.activeLayerId, orientation.id).getContext("2d").getImageData(0, 0, LAYER_SIZE, LAYER_SIZE)])),
                     axis: null,
                 };
                 if (straightStroke && event.shiftKey) {
@@ -3370,7 +3455,8 @@ document.addEventListener("alpine:init", () => {
                     const lockedPoint = straightStroke.axis === "y"
                         ? { x: straightStroke.start.x, y: point.y }
                         : { x: point.x, y: straightStroke.start.y };
-                    this.activeContext().putImageData(straightStroke.pixels, 0, 0);
+                    if (straightStroke.views) for (const orientation of ORIENTATIONS) this.canvasFor(this.activeLayerId, orientation.id).getContext("2d").putImageData(straightStroke.views[orientation.id], 0, 0);
+                    else this.activeContext().putImageData(straightStroke.pixels, 0, 0);
                     this.drawLine(straightStroke.start, lockedPoint);
                     this.lastPoint = lockedPoint;
                     this.queueRender();
@@ -3384,6 +3470,7 @@ document.addEventListener("alpine:init", () => {
 
             endStroke(event) {
                 if (event.pointerId !== this.pointerId) return;
+                if (this.tool === "eraser" && this.compactLayerDepth()) this.render();
                 this.drawing = false;
                 this.pointerId = null;
                 this.lastPoint = null;
@@ -3431,7 +3518,7 @@ document.addEventListener("alpine:init", () => {
                     perspectiveSelectionMasks = Object.fromEntries(ORIENTATIONS.map((orientation) => [orientation.id, new Uint8Array(snapshot.perspectiveSelectionMasks[orientation.id])]));
                     this.setSelectionMask(new Uint8Array(perspectiveSelectionMasks[this.activeOrientation]), false);
                 } else if (snapshot.selectionMask) this.setSelectionMask(new Uint8Array(snapshot.selectionMask));
-                else this.clearSelection();
+                else this.clearSelection(true);
                 selectionAnchor = null;
                 moveState = null;
                 quantizationSource = null;
@@ -3495,6 +3582,7 @@ document.addEventListener("alpine:init", () => {
                     gridVisible: this.gridVisible,
                     verticalSymmetry: this.verticalSymmetry,
                     horizontalSymmetry: this.horizontalSymmetry,
+                    linkPerspectiveSelections: this.linkPerspectiveSelections,
                     counters: { layer: nextLayerId, group: nextGroupId, palette: nextPaletteId },
                 };
                 const assets = new Map();
@@ -3564,6 +3652,7 @@ document.addEventListener("alpine:init", () => {
                     this.gridVisible = !!project.gridVisible;
                     this.verticalSymmetry = !!project.verticalSymmetry;
                     this.horizontalSymmetry = !!project.horizontalSymmetry;
+                    this.linkPerspectiveSelections = project.linkPerspectiveSelections !== false;
                     nextLayerId = Math.max(Number(project.counters?.layer) || 0, ...this.layers.map((layer) => Number(layer.id.match(/\d+$/)?.[0]) || 0));
                     nextGroupId = Math.max(Number(project.counters?.group) || 0, ...this.groups.map((group) => Number(group.id.match(/\d+$/)?.[0]) || 0));
                     nextPaletteId = Math.max(Number(project.counters?.palette) || 0, ...this.importedPalettes.map((entry) => Number(entry.id.match(/\d+$/)?.[0]) || 0));
@@ -3571,7 +3660,7 @@ document.addEventListener("alpine:init", () => {
                         perspectiveSelectionMasks = Object.fromEntries(ORIENTATIONS.map((orientation) => [orientation.id, new Uint8Array(project.perspectiveSelectionMasks[orientation.id])]));
                         this.setSelectionMask(new Uint8Array(perspectiveSelectionMasks.front), false);
                     } else if (project.selectionMask?.length === LAYER_SIZE * LAYER_SIZE) this.setSelectionMask(new Uint8Array(project.selectionMask));
-                    else this.clearSelection();
+                    else this.clearSelection(true);
                     this.history = [];
                     this.future = [];
                     selectionAnchor = null;
@@ -3592,10 +3681,65 @@ document.addEventListener("alpine:init", () => {
             clearCanvas() {
                 if (!this.canvasFor()) return;
                 this.pushHistory();
-                this.markViewEdited();
-                if (selectionMask) clearMaskedPixels(this.activeContext(), selectionMask);
+                const hasPerspectiveSelection = perspectiveSelectionMasks && ORIENTATIONS.some((orientation) => maskBounds(perspectiveSelectionMasks[orientation.id]));
+                if (hasPerspectiveSelection) this.clearPerspectivePixels(this.expandedSelectionMasks(perspectiveSelectionMasks));
+                else if (selectionMask) {
+                    this.markViewEdited();
+                    clearMaskedPixels(this.activeContext(), selectionMask);
+                }
                 else this.activeContext().clearRect(0, 0, LAYER_SIZE, LAYER_SIZE);
                 this.render();
+            },
+
+            clearPerspectivePixels(masks, compact = true) {
+                for (const orientation of ORIENTATIONS) {
+                    const key = this.layerViewKey(this.activeLayerId, orientation.id);
+                    clearMaskedPixels(this.canvasFor(this.activeLayerId, orientation.id).getContext("2d"), masks[orientation.id]);
+                    if (orientation.id !== "front" && maskBounds(masks[orientation.id])) editedViews.add(key);
+                    if (this.activePaletteId === "default") paletteSources.delete(key);
+                    else paletteSourceEdits.add(key);
+                }
+                if (compact) this.compactLayerDepth();
+            },
+
+            compactLayerDepth(id = this.activeLayerId) {
+                const layer = this.layers.find((candidate) => candidate.id === id);
+                if (!layer) return false;
+                const range = layerDepthRanges(this.layers).get(id);
+                const views = Object.fromEntries(ORIENTATIONS.map((orientation) => [orientation.id, this.canvasFor(id, orientation.id).getContext("2d").getImageData(LAYER_PADDING, LAYER_PADDING, CANVAS_SIZE, CANVAS_SIZE).data]));
+                const occupied = (x, y, z) => views.front[(y * CANVAS_SIZE + x) * 4 + 3]
+                    && views.back[(y * CANVAS_SIZE + CANVAS_SIZE - 1 - x) * 4 + 3]
+                    && views.right[(y * CANVAS_SIZE + 31 - z) * 4 + 3]
+                    && views.left[(y * CANVAS_SIZE + 32 + z) * 4 + 3]
+                    && views.top[((32 + z) * CANVAS_SIZE + x) * 4 + 3]
+                    && views.bottom[((31 - z) * CANVAS_SIZE + x) * 4 + 3];
+                let start = null;
+                let end = null;
+                for (let z = range.start; z < range.end; z++) {
+                    let sliceOccupied = false;
+                    for (let y = 0; y < CANVAS_SIZE && !sliceOccupied; y++) for (let x = 0; x < CANVAS_SIZE; x++) if (occupied(x, y, z)) {
+                        sliceOccupied = true;
+                        break;
+                    }
+                    if (!sliceOccupied) continue;
+                    start ??= z;
+                    end = z + 1;
+                }
+                if (start === null || start === range.start && end === range.end) return false;
+                const positive = layerDepth(layer) > 0;
+                layer.depth = (positive ? 1 : -1) * (end - start);
+                layer.offset = positive ? 1 - end : -1 - start;
+                this.normalizeLayerOffsets();
+                return true;
+            },
+
+            expandedSelectionMasks(masks) {
+                const expanded = Object.fromEntries(ORIENTATIONS.map((orientation) => [orientation.id, new Uint8Array(LAYER_SIZE * LAYER_SIZE)]));
+                for (const source of ORIENTATIONS) {
+                    const linked = this.relativeSelectionMasks(masks[source.id], source.id);
+                    for (const target of ORIENTATIONS) for (let index = 0; index < linked[target.id].length; index++) if (linked[target.id][index]) expanded[target.id][index] = 1;
+                }
+                return expanded;
             },
 
             translateSelection(dx, dy) {
@@ -3607,18 +3751,8 @@ document.addEventListener("alpine:init", () => {
                 this.pushHistory();
                 this.markViewEdited();
                 const mask = new Uint8Array(selectionMask);
-                if (this.activeOrientation === "front") {
-                    this.translateRelativeViews(mask, dx, dy);
-                    this.setSelectionMask(translateMask(mask, dx, dy));
-                    this.render();
-                    return;
-                }
-                const source = this.canvasFor();
-                const pixels = selectionPixels(source, mask, selection);
-                const context = this.activeContext();
-                clearMaskedPixels(context, mask);
-                context.drawImage(pixels, selection.x + dx + LAYER_PADDING, selection.y + dy + LAYER_PADDING);
-                this.setSelectionMask(translateMask(mask, dx, dy));
+                perspectiveSelectionMasks = this.translateRelativeViews(mask, dx, dy);
+                this.setSelectionMask(new Uint8Array(perspectiveSelectionMasks[this.activeOrientation]), false);
                 this.render();
             },
 
@@ -3628,13 +3762,16 @@ document.addEventListener("alpine:init", () => {
                 const bounds = { ...this.selection };
                 const pixels = selectionPixels(this.canvasFor(), mask, bounds);
                 const layer = this.layers.find((candidate) => candidate.id === this.activeLayerId);
-                const relativeMasks = this.relativeSelectionMasks(mask);
+                const relativeMasks = perspectiveSelectionMasks
+                    ? Object.fromEntries(ORIENTATIONS.map((orientation) => [orientation.id, new Uint8Array(perspectiveSelectionMasks[orientation.id])]))
+                    : this.relativeSelectionMasks(mask);
                 internalClipboard = {
                     pixels,
                     mask,
                     bounds,
                     depth: layerDepth(layer),
                     offset: layerOffset(layer),
+                    selectionMasks: relativeMasks,
                     views: Object.fromEntries(ORIENTATIONS.map((orientation) => [orientation.id, maskedLayerPixels(this.canvasFor(layer.id, orientation.id), relativeMasks[orientation.id])])),
                     palettes: Object.fromEntries(ORIENTATIONS.map((orientation) => [orientation.id, quantizedPalettes.get(this.layerViewKey(layer.id, orientation.id))])),
                 };
@@ -3645,56 +3782,48 @@ document.addEventListener("alpine:init", () => {
                 }
                 if (!cut) return;
                 this.pushHistory();
-                this.markViewEdited();
-                clearMaskedPixels(this.activeContext(), mask);
+                this.clearPerspectivePixels(this.expandedSelectionMasks(relativeMasks));
                 this.render();
             },
 
-            relativeSelectionMasks(mask) {
+            relativeSelectionMasks(mask, sourceOrientation = this.activeOrientation) {
                 const masks = Object.fromEntries(ORIENTATIONS.map((orientation) => [orientation.id, new Uint8Array(LAYER_SIZE * LAYER_SIZE)]));
-                const front = this.canvasFor(this.activeLayerId, "front").getContext("2d").getImageData(LAYER_PADDING, LAYER_PADDING, CANVAS_SIZE, CANVAS_SIZE).data;
                 const range = layerDepthRanges(this.layers).get(this.activeLayerId);
-                const left = new Int16Array(CANVAS_SIZE).fill(-1);
-                const right = new Int16Array(CANVAS_SIZE).fill(-1);
-                const top = new Int16Array(CANVAS_SIZE).fill(-1);
-                const bottom = new Int16Array(CANVAS_SIZE).fill(-1);
-                for (let y = 0; y < CANVAS_SIZE; y++) for (let x = 0; x < CANVAS_SIZE; x++) if (front[(y * CANVAS_SIZE + x) * 4 + 3]) {
-                    if (left[y] < 0) left[y] = x;
-                    right[y] = x;
-                    if (top[x] < 0) top[x] = y;
-                    bottom[x] = y;
-                }
-                const selectFront = (x, y) => { if (x >= 0 && y >= 0 && x < CANVAS_SIZE && y < CANVAS_SIZE) masks.front[maskIndex(x, y)] = 1; };
+                masks[sourceOrientation] = new Uint8Array(mask);
                 for (let y = 0; y < CANVAS_SIZE; y++) for (let x = 0; x < CANVAS_SIZE; x++) {
                     if (!mask[maskIndex(x, y)]) continue;
-                    if (this.activeOrientation === "front") selectFront(x, y);
-                    else if (this.activeOrientation === "back") selectFront(CANVAS_SIZE - 1 - x, y);
-                    else if (this.activeOrientation === "right" && containsDepthZ(range, 31 - x)) selectFront(right[y], y);
-                    else if (this.activeOrientation === "left" && containsDepthZ(range, x - 32)) selectFront(left[y], y);
-                    else if (this.activeOrientation === "top" && containsDepthZ(range, y - 32)) selectFront(x, top[x]);
-                    else if (this.activeOrientation === "bottom" && containsDepthZ(range, 31 - y)) selectFront(x, bottom[x]);
+                    if (sourceOrientation === "front") masks.back[maskIndex(CANVAS_SIZE - 1 - x, y)] = 1;
+                    else if (sourceOrientation === "back") masks.front[maskIndex(CANVAS_SIZE - 1 - x, y)] = 1;
+                    else if ((sourceOrientation === "right" && containsDepthZ(range, 31 - x)) || (sourceOrientation === "left" && containsDepthZ(range, x - 32))) masks[sourceOrientation === "right" ? "left" : "right"][maskIndex(CANVAS_SIZE - 1 - x, y)] = 1;
+                    else if ((sourceOrientation === "top" && containsDepthZ(range, y - 32)) || (sourceOrientation === "bottom" && containsDepthZ(range, 31 - y))) masks[sourceOrientation === "top" ? "bottom" : "top"][maskIndex(x, CANVAS_SIZE - 1 - y)] = 1;
                 }
-                for (let y = 0; y < CANVAS_SIZE; y++) for (let x = 0; x < CANVAS_SIZE; x++) {
-                    if (!masks.front[maskIndex(x, y)]) continue;
-                    masks.back[maskIndex(CANVAS_SIZE - 1 - x, y)] = 1;
-                    if (x === right[y]) for (let z = range.start; z < range.end; z++) masks.right[maskIndex(31 - z, y)] = 1;
-                    if (x === left[y]) for (let z = range.start; z < range.end; z++) masks.left[maskIndex(32 + z, y)] = 1;
-                    if (y === top[x]) for (let z = range.start; z < range.end; z++) masks.top[maskIndex(x, 32 + z)] = 1;
-                    if (y === bottom[x]) for (let z = range.start; z < range.end; z++) masks.bottom[maskIndex(x, 31 - z)] = 1;
-                }
-                masks[this.activeOrientation] = new Uint8Array(mask);
                 return masks;
             },
 
+            transformSelectionMasks(mask) {
+                return perspectiveSelectionMasks
+                    ? Object.fromEntries(ORIENTATIONS.map((orientation) => [orientation.id, new Uint8Array(perspectiveSelectionMasks[orientation.id])]))
+                    : this.relativeSelectionMasks(mask);
+            },
+
             relativeTranslation(orientation, dx, dy) {
-                if (orientation === "back") return [-dx, dy];
-                if (orientation === "right" || orientation === "left") return [0, dy];
-                if (orientation === "top" || orientation === "bottom") return [dx, 0];
-                return [dx, dy];
+                const [worldX, worldY, worldZ] = this.activeOrientation === "front" ? [dx, dy, 0]
+                    : this.activeOrientation === "back" ? [-dx, dy, 0]
+                    : this.activeOrientation === "right" ? [0, dy, -dx]
+                    : this.activeOrientation === "left" ? [0, dy, dx]
+                    : this.activeOrientation === "top" ? [dx, 0, dy]
+                    : [dx, 0, -dy];
+                if (orientation === "front") return [worldX, worldY];
+                if (orientation === "back") return [-worldX, worldY];
+                if (orientation === "right") return [-worldZ, worldY];
+                if (orientation === "left") return [worldZ, worldY];
+                if (orientation === "top") return [worldX, worldZ];
+                return [worldX, -worldZ];
             },
 
             translateRelativeViews(mask, dx, dy) {
-                const masks = this.relativeSelectionMasks(mask);
+                const masks = this.transformSelectionMasks(mask);
+                const translated = {};
                 for (const orientation of ORIENTATIONS) {
                     const canvas = this.canvasFor(this.activeLayerId, orientation.id);
                     const context = canvas.getContext("2d");
@@ -3702,45 +3831,64 @@ document.addEventListener("alpine:init", () => {
                     const [moveX, moveY] = this.relativeTranslation(orientation.id, dx, dy);
                     clearMaskedPixels(context, masks[orientation.id]);
                     context.drawImage(pixels, moveX, moveY);
+                    translated[orientation.id] = translateMask(masks[orientation.id], moveX, moveY);
                     if (orientation.id !== "front") editedViews.add(this.layerViewKey(this.activeLayerId, orientation.id));
                 }
+                return translated;
             },
 
             flipRelativeViews(mask, bounds, horizontal, vertical) {
-                const masks = this.relativeSelectionMasks(mask);
+                const masks = this.transformSelectionMasks(mask);
+                const transformedMasks = Object.fromEntries(ORIENTATIONS.map((orientation) => [orientation.id, new Uint8Array(LAYER_SIZE * LAYER_SIZE)]));
                 const sources = Object.fromEntries(ORIENTATIONS.map((orientation) => [orientation.id, this.canvasFor(this.activeLayerId, orientation.id).getContext("2d").getImageData(0, 0, LAYER_SIZE, LAYER_SIZE)]));
                 const results = Object.fromEntries(ORIENTATIONS.map((orientation) => [orientation.id, new ImageData(new Uint8ClampedArray(sources[orientation.id].data), LAYER_SIZE, LAYER_SIZE)]));
                 for (const orientation of ORIENTATIONS) for (let index = 0; index < masks[orientation.id].length; index++) if (masks[orientation.id][index]) results[orientation.id].data.fill(0, index * 4, index * 4 + 4);
-                const reflectX = (x) => bounds.x * 2 + bounds.width - 1 - x;
-                const reflectBackX = (x) => (CANVAS_SIZE - bounds.x - bounds.width) * 2 + bounds.width - 1 - x;
-                const reflectY = (y) => bounds.y * 2 + bounds.height - 1 - y;
+                const flipAxis = this.activeOrientation === "front" || this.activeOrientation === "back"
+                    ? horizontal ? "x" : "y"
+                    : this.activeOrientation === "right" || this.activeOrientation === "left"
+                        ? horizontal ? "z" : "y"
+                        : horizontal ? "x" : "z";
+                const screenCenter = (horizontal ? bounds.x : bounds.y) * 2 + (horizontal ? bounds.width : bounds.height) - 1;
+                const xCenter = this.activeOrientation === "back" ? 126 - screenCenter : screenCenter;
+                const zCenter = this.activeOrientation === "right" ? 62 - screenCenter
+                    : this.activeOrientation === "left" || this.activeOrientation === "top" ? screenCenter - 64
+                    : 62 - screenCenter;
                 for (const orientation of ORIENTATIONS) for (let y = 0; y < CANVAS_SIZE; y++) for (let x = 0; x < CANVAS_SIZE; x++) {
                     const sourceIndex = maskIndex(x, y);
                     if (!masks[orientation.id][sourceIndex]) continue;
                     let targetOrientation = orientation.id;
                     let targetX = x;
                     let targetY = y;
-                    if (horizontal) {
-                        if (orientation.id === "front" || orientation.id === "top" || orientation.id === "bottom") targetX = reflectX(x);
-                        else if (orientation.id === "back") targetX = reflectBackX(x);
+                    if (flipAxis === "x") {
+                        if (orientation.id === "front" || orientation.id === "top" || orientation.id === "bottom") targetX = xCenter - x;
+                        else if (orientation.id === "back") targetX = 63 - (xCenter - (63 - x));
                         else {
                             targetOrientation = orientation.id === "right" ? "left" : "right";
                             targetX = CANVAS_SIZE - 1 - x;
                         }
-                    } else if (vertical) {
-                        if (orientation.id === "front" || orientation.id === "back" || orientation.id === "right" || orientation.id === "left") targetY = reflectY(y);
+                    } else if (flipAxis === "y") {
+                        if (orientation.id === "front" || orientation.id === "back" || orientation.id === "right" || orientation.id === "left") targetY = screenCenter - y;
                         else {
                             targetOrientation = orientation.id === "top" ? "bottom" : "top";
                             targetY = CANVAS_SIZE - 1 - y;
                         }
-                    }
+                    } else if (orientation.id === "front" || orientation.id === "back") {
+                        targetOrientation = orientation.id === "front" ? "back" : "front";
+                        targetX = CANVAS_SIZE - 1 - x;
+                    } else if (orientation.id === "right") targetX = 31 - (zCenter - (31 - x));
+                    else if (orientation.id === "left") targetX = zCenter - (x - 32) + 32;
+                    else if (orientation.id === "top") targetY = zCenter - (y - 32) + 32;
+                    else if (orientation.id === "bottom") targetY = 31 - (zCenter - (31 - y));
+                    if (targetX < 0 || targetX >= CANVAS_SIZE || targetY < 0 || targetY >= CANVAS_SIZE) continue;
                     const targetIndex = maskIndex(targetX, targetY);
+                    transformedMasks[targetOrientation][targetIndex] = 1;
                     results[targetOrientation].data.set(sources[orientation.id].data.subarray(sourceIndex * 4, sourceIndex * 4 + 4), targetIndex * 4);
                 }
                 for (const orientation of ORIENTATIONS) {
                     this.canvasFor(this.activeLayerId, orientation.id).getContext("2d").putImageData(results[orientation.id], 0, 0);
                     if (orientation.id !== "front") editedViews.add(this.layerViewKey(this.activeLayerId, orientation.id));
                 }
+                return transformedMasks;
             },
 
             pasteSelection() {
@@ -3760,7 +3908,8 @@ document.addEventListener("alpine:init", () => {
                         quantizedPalettes.set(key, { palette, colors: palette.map(hexColor), allowed: new Set(palette), confirmed: sourcePalette.confirmed, locked: sourcePalette.locked });
                     }
                 }
-                this.setSelectionMask(new Uint8Array(internalClipboard.mask));
+                perspectiveSelectionMasks = Object.fromEntries(ORIENTATIONS.map((orientation) => [orientation.id, new Uint8Array(internalClipboard.selectionMasks[orientation.id])]));
+                this.setSelectionMask(new Uint8Array(perspectiveSelectionMasks[this.activeOrientation]), false);
                 this.render();
             },
 
