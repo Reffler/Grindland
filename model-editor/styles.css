@@ -227,10 +227,15 @@ button svg {
     height: 15px;
 }
 
-.palette-entry-header span:last-child {
-    color: #777f84;
-    font-size: 10px;
-    font-weight: 400;
+.palette-entry-header .palette-upload {
+    width: 46px;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    gap: 3px;
+    border-color: #62696e;
+    background: #24282b;
+    box-shadow: inset 0 0 0 1px rgb(255 255 255 / 5%);
 }
 
 .quantization {
@@ -241,6 +246,13 @@ button svg {
     color: #9ca3a8;
     font-size: 10px;
     font-weight: 600;
+}
+
+.topbar .quantization {
+    width: 230px;
+    flex: 0 0 230px;
+    padding-left: 12px;
+    border-left: 1px solid #3b4044;
 }
 
 .quantization input {
@@ -334,6 +346,42 @@ button svg {
     font-weight: 600;
 }
 
+.uploaded-palette {
+    margin-top: 10px;
+    padding-top: 10px;
+    border-top: 1px solid #34383c;
+}
+
+.force-palette {
+    width: 100%;
+    height: 30px;
+    margin-top: 8px;
+    border-color: #4b5155;
+    background: #24282b;
+    font-size: 11px;
+    font-weight: 600;
+}
+
+.uploaded-palette header {
+    display: flex;
+    justify-content: space-between;
+    margin-bottom: 8px;
+    color: #b8bdc0;
+    font-size: 10px;
+    font-weight: 600;
+}
+
+.uploaded-palette header span:last-child {
+    color: #777f84;
+    font-weight: 400;
+}
+
+.uploaded-palette-swatches {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 7px;
+}
+
 .workspace {
     position: relative;
     grid-column: 2;
@@ -372,7 +420,7 @@ button svg {
     position: relative;
     grid-column: 2;
     grid-row: 2;
-    width: min(100%, calc(100vh - 154px));
+    width: min(100%, calc(100vh - 204px));
     align-self: end;
     justify-self: end;
     aspect-ratio: 1;
@@ -427,49 +475,37 @@ button svg {
     cursor: grabbing;
 }
 
-.preview-presets {
+.preview-controls {
     grid-column: 2;
     grid-row: 1;
-    width: min(100%, calc(100vh - 154px));
+    width: min(100%, calc(100vh - 204px));
     align-self: end;
     justify-self: end;
     display: grid;
-    grid-template-columns: repeat(8, 1fr);
     gap: 6px;
+}
+
+.preview-presets {
+    display: grid;
+    grid-template-columns: repeat(9, 1fr);
+    gap: 2px;
     pointer-events: none;
 }
 
 .preview-presets button {
     width: 100%;
-    height: 38px;
-    border-color: #4b5155;
-    border-radius: 5px;
-    background: rgb(27 30 33 / 92%);
-    color: #c9cdcf;
-    opacity: 0.4;
+    height: 44px;
+    grid-template-rows: 17px auto;
+    gap: 2px;
+    padding: 4px 3px;
+    font-size: 10px;
+    font-weight: 600;
     pointer-events: auto;
 }
 
-.preview-presets button:hover:not(:disabled) {
-    border-color: #4b5155;
-    background: #292d30;
-    color: #ffffff;
-}
-
-.preview-presets button.active {
-    border-color: #55d6be;
-    background: #263c38;
-    color: #75ead4;
-    opacity: 1;
-}
-
-.preview-presets .preview-origin {
-    opacity: 1;
-}
-
 .preview-presets button svg {
-    width: 18px;
-    height: 18px;
+    width: 15px;
+    height: 15px;
 }
 
 .canvas-frame > canvas,
@@ -627,6 +663,8 @@ button svg {
 }
 
 .model-editor-header {
+    width: 100%;
+    min-width: 0;
     min-height: 58px;
     display: flex;
     align-items: center;
@@ -634,20 +672,34 @@ button svg {
     border-bottom: 1px solid #34383c;
 }
 
-.model-editor-header h1 {
-    margin: 0;
+.model-name {
+    flex: 1 1 0;
+    width: 0;
+    min-width: 0;
+    padding: 5px 7px;
+    border: 1px solid transparent;
+    background: transparent;
+    color: inherit;
     font-size: 14px;
 }
 
+.model-name:hover,
+.model-name:focus {
+    border-color: #454b50;
+    background: #17191b;
+    outline: none;
+}
+
 .model-file-actions {
+    flex: none;
     display: flex;
     gap: 2px;
     margin-left: 8px;
 }
 
 .model-file-actions button {
-    width: 30px;
-    height: 30px;
+    width: 32px;
+    height: 32px;
 }
 
 .layers-header {
@@ -668,10 +720,17 @@ button svg {
 
 .orientation-tabs button {
     width: 100%;
-    height: 30px;
-    padding: 0 3px;
+    height: 44px;
+    grid-template-rows: 17px auto;
+    gap: 2px;
+    padding: 4px 3px;
     font-size: 10px;
     font-weight: 600;
+}
+
+.orientation-tabs button svg {
+    width: 15px;
+    height: 15px;
 }
 
 .layer-actions {
@@ -697,7 +756,7 @@ button svg {
 
 .layer-group-row {
     position: relative;
-    height: 42px;
+    height: 52px;
     display: flex;
     align-items: center;
     gap: 4px;
@@ -737,9 +796,25 @@ button svg {
     background: #263c38;
 }
 
+.layer-group-row.locked > :not(.group-state-actions) {
+    filter: grayscale(0.75);
+    opacity: 0.5;
+}
+
+.group-state-actions {
+    display: grid;
+    flex: 0 0 28px;
+    gap: 2px;
+}
+
+.group-state-actions button {
+    width: 28px;
+    height: 20px;
+}
+
 .group-visibility {
     width: 28px;
-    height: 28px;
+    height: 20px;
     flex: 0 0 28px;
 }
 
@@ -779,7 +854,7 @@ button svg {
 }
 
 .layer-group-row .group-name[readonly] {
-    cursor: grab;
+    cursor: text;
     user-select: none;
 }
 
@@ -896,6 +971,11 @@ button svg {
     box-shadow: inset 3px 0 #75ead4;
 }
 
+.layer-row.locked > :not(.layer-state-actions) {
+    filter: grayscale(0.75);
+    opacity: 0.5;
+}
+
 .layer-row.grouped {
     width: 100%;
     margin-left: 0;
@@ -940,8 +1020,29 @@ button svg {
     height: 28px;
 }
 
-.visibility.muted {
-    opacity: 0.28;
+.layer-state-actions {
+    display: grid;
+    gap: 2px;
+}
+
+.layer-state-actions button {
+    width: 28px;
+    height: 24px;
+}
+
+.lock-toggle .locked-icon,
+.visibility .visibility-off {
+    display: none;
+}
+
+.lock-toggle.active .locked-icon,
+.visibility.hidden .visibility-off {
+    display: block;
+}
+
+.lock-toggle.active .unlocked-icon,
+.visibility.hidden .visibility-on {
+    display: none;
 }
 
 .layer-thumbnail {
@@ -1120,19 +1221,19 @@ button svg {
     .canvas-zoom,
     .canvas-controls,
     .canvas-frame,
-    .preview-presets,
+    .preview-controls,
     .future-window {
         grid-column: 1;
         grid-row: auto;
     }
 
-    .preview-presets,
+    .preview-controls,
     .future-window {
         width: 100%;
         justify-self: stretch;
     }
 
     .preview-presets button {
-        height: 30px;
+        height: 44px;
     }
 }
